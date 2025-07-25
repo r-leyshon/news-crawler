@@ -18,6 +18,11 @@
     "content_max_length": 5000,
     "summary_max_tokens": 200
   },
+  "azure_openai": {
+    "chat_deployment_name": "gpt-4.1",
+    "embedding_deployment_name": "text-embedding-ada-002",
+    "api_version": "2025-04-01-preview"
+  },
   "embedding_settings": {
     "model": "text-embedding-ada-002",
     "chunk_size": 1000,

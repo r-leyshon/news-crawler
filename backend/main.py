@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import chromadb
 from chromadb.config import Settings
-import openai
+from openai import AzureOpenAI
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
@@ -14,10 +14,23 @@ import os
 from datetime import datetime
 import uuid
 import logging
+import json
+from pyprojroot import here
+from dotenv import dotenv_values
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Load configuration
+with open(here("backend/config.json"), "r") as f:
+    config = json.load(f)
+
+# Extract Azure OpenAI config
+azure_config = config["azure_openai"]
+CHAT_DEPLOYMENT_NAME = azure_config["chat_deployment_name"]
+EMBEDDING_DEPLOYMENT_NAME = azure_config["embedding_deployment_name"]
+API_VERSION = azure_config["api_version"]
 
 app = FastAPI(title="AI Article Assistant API")
 
@@ -30,11 +43,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Azure OpenAI Configuration
-openai.api_type = "azure"
-openai.api_base = os.getenv("AZURE_OPENAI_ENDPOINT", "https://your-resource.openai.azure.com/")
-openai.api_version = "2023-05-15"
-openai.api_key = os.getenv("AZURE_OPENAI_KEY", "your-api-key")
+# Load environment variables
+env_vars = dotenv_values(here("backend/.env"))
+
+# Initialize Azure OpenAI client
+openai_client = AzureOpenAI(
+    api_key=env_vars.get("AZURE_OPENAI_KEY"),
+    api_version=API_VERSION,
+    azure_endpoint=env_vars.get("AZURE_OPENAI_ENDPOINT")
+)
 
 # ChromaDB Configuration
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -65,11 +82,11 @@ class Article(BaseModel):
 async def get_embedding(text: str) -> List[float]:
     """Generate embedding using Azure OpenAI"""
     try:
-        response = await openai.Embedding.acreate(
-            engine="text-embedding-ada-002",  # Replace with your deployment name
+        response = await openai_client.embeddings.create(
+            model=EMBEDDING_DEPLOYMENT_NAME,
             input=text
         )
-        return response['data'][0]['embedding']
+        return response.data[0].embedding
     except Exception as e:
         logger.error(f"Error generating embedding: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate embedding")
@@ -77,8 +94,8 @@ async def get_embedding(text: str) -> List[float]:
 async def generate_summary(text: str) -> str:
     """Generate summary using Azure OpenAI"""
     try:
-        response = await openai.ChatCompletion.acreate(
-            engine="gpt-4",  # Replace with your deployment name
+        response = await openai_client.chat.completions.create(
+            model=CHAT_DEPLOYMENT_NAME,
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that creates concise summaries of articles. Summarize the following article in 3-5 sentences, focusing on the main points and key insights."},
                 {"role": "user", "content": f"Article text: {text[:4000]}"}  # Limit text length
@@ -280,8 +297,8 @@ async def ask_question(request: QuestionRequest):
         context = "\n".join(context_parts)
         
         # Generate answer using Azure OpenAI
-        response = await openai.ChatCompletion.acreate(
-            engine="gpt-4",  # Replace with your deployment name
+        response = await openai_client.chat.completions.create(
+            model=CHAT_DEPLOYMENT_NAME,
             messages=[
                 {
                     "role": "system", 
