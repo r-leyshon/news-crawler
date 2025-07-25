@@ -1,21 +1,14 @@
 echo "Setting up AI Article Assistant..."
 
-# Create backend virtual environment
-echo "Creating Python virtual environment..."
+# Create backend conda environment with local prefix
+echo "Creating conda environment..."
 cd backend
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+conda create --prefix ./backend-env python=3.11 -y
+conda activate ./backend-env
 
 # Install Python dependencies
 echo "Installing Python dependencies..."
 pip install -r requirements.txt
-
-# Create ChromaDB directory
-mkdir -p chroma_db
-
-# Copy environment file
-cp .env.example .env
-echo "Please edit backend/.env with your Azure OpenAI credentials"
 
 # Setup frontend
 echo "Setting up frontend..."
@@ -26,6 +19,9 @@ echo "Setup complete!"
 echo ""
 echo "Next steps:"
 echo "1. Edit backend/.env with your Azure OpenAI credentials"
-echo "2. Start the backend: cd backend && uvicorn main:app --reload"
-echo "3. Start the frontend: npm run dev"
-echo "4. Open http://localhost:3000 in your browser"
+echo "2. Activate the conda environment: cd backend && conda activate ./backend-env"
+echo "3. Start the backend: uvicorn main:app --reload"
+echo "4. In a new terminal, start the frontend: npm run dev"
+echo "5. Open http://localhost:3000 in your browser"
+echo ""
+echo "Note: The conda environment was created but needs to be manually activated in your terminal."
