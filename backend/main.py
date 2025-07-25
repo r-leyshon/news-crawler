@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import chromadb
 from chromadb.config import Settings
-from openai import AzureOpenAI
+from openai import AsyncAzureOpenAI
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
@@ -17,6 +17,7 @@ import logging
 import json
 from pyprojroot import here
 from dotenv import dotenv_values
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -47,14 +48,14 @@ app.add_middleware(
 env_vars = dotenv_values(here("backend/.env"))
 
 # Initialize Azure OpenAI client
-openai_client = AzureOpenAI(
+openai_client = AsyncAzureOpenAI(
     api_key=env_vars.get("AZURE_OPENAI_KEY"),
     api_version=API_VERSION,
     azure_endpoint=env_vars.get("AZURE_OPENAI_ENDPOINT")
 )
 
 # ChromaDB Configuration
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+chroma_client = chromadb.PersistentClient(path=here("backend/chroma_db"))
 collection = chroma_client.get_or_create_collection(
     name="articles",
     metadata={"hnsw:space": "cosine"}
