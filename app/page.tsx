@@ -111,31 +111,79 @@ export default function ArticleAssistant() {
     }
 
     setMessages((prev) => [...prev, userMessage])
+    const questionInput = input
     setInput("")
     setIsLoading(true)
 
+    // Create assistant message with empty content that we'll update
+    const assistantMessageId = (Date.now() + 1).toString()
+    const assistantMessage: Message = {
+      id: assistantMessageId,
+      role: "assistant",
+      content: "",
+      timestamp: new Date(),
+    }
+    setMessages((prev) => [...prev, assistantMessage])
+
     try {
-      const response = await fetch(`${API_BASE}/ask`, {
+      const response = await fetch(`${API_BASE}/ask/stream`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ question: input }),
+        body: JSON.stringify({ question: questionInput }),
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        const assistantMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: data.answer,
-          timestamp: new Date(),
-        }
-        setMessages((prev) => [...prev, assistantMessage])
-      } else {
+      if (!response.ok) {
         throw new Error("Failed to get response")
       }
+
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+
+      if (reader) {
+        let buffer = ""
+        
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ""
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6))
+                if (data.content) {
+                  setMessages((prev) => 
+                    prev.map((msg) => 
+                      msg.id === assistantMessageId 
+                        ? { ...msg, content: msg.content + data.content }
+                        : msg
+                    )
+                  )
+                }
+                if (data.done) {
+                  setIsLoading(false)
+                }
+              } catch (parseError) {
+                console.error("Error parsing streaming data:", parseError)
+              }
+            }
+          }
+        }
+      }
     } catch (error) {
+      console.error("Streaming error:", error)
+      setMessages((prev) => 
+        prev.map((msg) => 
+          msg.id === assistantMessageId 
+            ? { ...msg, content: "Sorry, there was an error generating the response." }
+            : msg
+        )
+      )
       toast({
         title: "Error",
         description: "Failed to get response from the assistant.",
@@ -263,7 +311,14 @@ export default function ArticleAssistant() {
                   {isLoading && (
                     <div className="flex justify-start">
                       <div className="bg-gray-100 p-3 rounded-lg">
-                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <div className="flex items-center gap-1">
+                          <span className="text-sm text-gray-500">AI is thinking</span>
+                          <div className="flex gap-1">
+                            <div className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0ms'}} />
+                            <div className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '150ms'}} />
+                            <div className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '300ms'}} />
+                          </div>
+                        </div>
                       </div>
                     </div>
                   )}

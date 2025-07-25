@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import chromadb
@@ -321,6 +322,73 @@ async def ask_question(request: QuestionRequest):
     except Exception as e:
         logger.error(f"Question answering error: {e}")
         raise HTTPException(status_code=500, detail="Failed to answer question")
+
+@app.post("/ask/stream")
+async def ask_question_stream(request: QuestionRequest):
+    """Answer question using RAG with streaming response"""
+    
+    async def generate_stream():
+        try:
+            # Generate embedding for question
+            question_embedding = await get_embedding(request.question)
+            
+            # Search for relevant articles
+            results = collection.query(
+                query_embeddings=[question_embedding],
+                n_results=5
+            )
+            
+            if not results['documents'][0]:
+                no_articles_msg = "I don't have any relevant articles to answer your question. Please run a crawl first to gather some articles."
+                yield f"data: {json.dumps({'content': no_articles_msg, 'done': True})}\n\n"
+                return
+            
+            # Prepare context from retrieved articles
+            context_parts = []
+            for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
+                context_parts.append(f"Article {i+1}: {metadata['title']}\nSummary: {doc}\nSource: {metadata['url']}\n")
+            
+            context = "\n".join(context_parts)
+            
+            # Generate streaming answer using Azure OpenAI
+            stream = await openai_client.chat.completions.create(
+                model=CHAT_DEPLOYMENT_NAME,
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": "You are an AI assistant that answers questions based on a collection of article summaries. Use only the information provided in the articles to answer questions. If the answer is not in the articles, say so. Always be helpful and cite which articles you're referencing when possible."
+                    },
+                    {
+                        "role": "user", 
+                        "content": f"Articles:\n{context}\n\nQuestion: {request.question}\n\nAnswer:"
+                    }
+                ],
+                max_tokens=500,
+                temperature=0.3,
+                stream=True
+            )
+            
+            async for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    content = chunk.choices[0].delta.content
+                    yield f"data: {json.dumps({'content': content, 'done': False})}\n\n"
+            
+            # Send completion signal
+            yield f"data: {json.dumps({'content': '', 'done': True})}\n\n"
+            
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+            yield f"data: {json.dumps({'content': 'Error: Failed to generate response.', 'done': True})}\n\n"
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
 
 @app.get("/articles", response_model=List[Article])
 async def get_articles():
