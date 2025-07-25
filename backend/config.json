@@ -1,0 +1,26 @@
+{
+  "search_keywords": [
+    "artificial intelligence",
+    "machine learning",
+    "deep learning",
+    "neural networks",
+    "computer vision",
+    "natural language processing",
+    "robotics",
+    "automation",
+    "data science",
+    "technology trends"
+  ],
+  "crawl_settings": {
+    "max_articles_per_crawl": 10,
+    "respect_robots_txt": true,
+    "skip_paywalled_content": true,
+    "content_max_length": 5000,
+    "summary_max_tokens": 200
+  },
+  "embedding_settings": {
+    "model": "text-embedding-ada-002",
+    "chunk_size": 1000,
+    "chunk_overlap": 200
+  }
+}
