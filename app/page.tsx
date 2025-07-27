@@ -21,11 +21,12 @@ interface Article {
   id: string
   title: string
   url: string
-  summary: string
+  summary?: string
   date_published?: string
   date_added: string
   public: boolean
   source: string
+  content_type?: string
 }
 
 export default function ArticleAssistant() {
@@ -272,6 +273,10 @@ export default function ArticleAssistant() {
                   <Calendar className="h-5 w-5" />
                   Recent Articles ({articles.length})
                 </CardTitle>
+                <p className="text-xs text-gray-500 mt-1">
+                  <span className="font-medium">Full Article:</span> Content scraped & summarized • 
+                  <span className="font-medium"> External Link:</span> Title only, click to read
+                </p>
               </CardHeader>
               <CardContent className="max-h-96 overflow-y-auto">
                 {articles.length === 0 ? (
@@ -282,12 +287,24 @@ export default function ArticleAssistant() {
                       <div key={article.id} className="border-b pb-3 last:border-b-0">
                         <h4 className="font-medium text-sm line-clamp-2 mb-1">{article.title}</h4>
                         <div className="flex items-center gap-2 mb-2">
-                          <Badge variant={article.public ? "default" : "secondary"} className="text-xs">
-                            {article.public ? "Public" : "Limited"}
+                          <Badge 
+                            variant={article.content_type === "link_only" ? "outline" : (article.public ? "default" : "secondary")} 
+                            className="text-xs"
+                          >
+                            {article.content_type === "link_only" 
+                              ? "External Link" 
+                              : (article.public ? "Full Article" : "Limited Access")
+                            }
                           </Badge>
                           <span className="text-xs text-gray-500">{article.source}</span>
                         </div>
-                        <p className="text-xs text-gray-600 line-clamp-2 mb-2">{article.summary}</p>
+                        {article.content_type === "link_only" ? (
+                          <p className="text-xs text-gray-600 mb-2 italic">
+                            Title and link only - click below to read the full article
+                          </p>
+                        ) : (
+                          <p className="text-xs text-gray-600 line-clamp-2 mb-2">{article.summary || "No summary available"}</p>
+                        )}
                         <a
                           href={article.url}
                           target="_blank"
@@ -295,7 +312,7 @@ export default function ArticleAssistant() {
                           className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1"
                         >
                           <ExternalLink className="h-3 w-3" />
-                          Read original
+                          {article.content_type === "link_only" ? "Read article" : "Read original"}
                         </a>
                       </div>
                     ))}

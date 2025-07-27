@@ -78,11 +78,12 @@ class Article(BaseModel):
     id: str
     title: str
     url: str
-    summary: str
+    summary: Optional[str] = None
     date_published: Optional[str] = None
     date_added: str
     public: bool
     source: str
+    content_type: Optional[str] = None
 
 # Helper Functions
 async def get_embedding(text: str) -> List[float]:
@@ -215,7 +216,7 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[d
         logger.error(f"Error scraping {url}: {e}")
         return None
 
-async def search_web(keywords: List[str], max_results: int = 10) -> List[str]:
+async def search_web(keywords: List[str], max_results: int = 10) -> List[dict]:
     """Search web using DuckDuckGo"""
     try:
         # Construct search query
@@ -233,14 +234,18 @@ async def search_web(keywords: List[str], max_results: int = 10) -> List[str]:
             backend="auto"
         )
         
-        # Extract URLs from results
-        urls = []
+        # Extract search result data including titles
+        search_results = []
         for result in results:
             if 'href' in result:
-                urls.append(result['href'])
+                search_results.append({
+                    'url': result['href'],
+                    'title': result.get('title', 'Untitled'),
+                    'body': result.get('body', ''),
+                })
         
-        logger.info(f"DuckDuckGo search returned {len(urls)} URLs for query: {query}")
-        return urls[:max_results]
+        logger.info(f"DuckDuckGo search returned {len(search_results)} results for query: {query}")
+        return search_results[:max_results]
         
     except Exception as e:
         logger.error(f"Error in DuckDuckGo search: {e}")
@@ -251,13 +256,16 @@ async def search_web(keywords: List[str], max_results: int = 10) -> List[str]:
 async def crawl_articles(request: CrawlRequest):
     """Crawl web for articles based on keywords"""
     try:
-        # Search for URLs
-        urls = await search_web(request.keywords, request.max_articles)
+        # Search for articles
+        search_results = await search_web(request.keywords, request.max_articles)
         
         articles_added = 0
         
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-            for url in urls:
+            for search_result in search_results:
+                url = search_result['url']
+                search_title = search_result['title']
+                search_body = search_result['body']
                 try:
                     # Check if article already exists
                     try:
@@ -268,51 +276,87 @@ async def crawl_articles(request: CrawlRequest):
                     except Exception as e:
                         logger.warning(f"Error checking existing article for {url}: {e}")
                     
-                    # Scrape article
+                    # Try to scrape article content
                     article_data = await scrape_article(session, url)
-                    if not article_data:
-                        logger.warning(f"Failed to scrape article: {url}")
-                        continue
                     
-                    # Generate summary
-                    try:
-                        summary = await generate_summary(article_data['content'])
-                        if not summary or summary.startswith("Summary generation"):
-                            logger.warning(f"Summary generation failed for {url}, using truncated content")
+                    if article_data:
+                        # Full article scraped successfully
+                        try:
+                            summary = await generate_summary(article_data['content'])
+                            if not summary or summary.startswith("Summary generation"):
+                                logger.warning(f"Summary generation failed for {url}, using truncated content")
+                                summary = article_data['content'][:500] + "..."
+                        except Exception as e:
+                            logger.error(f"Summary generation error for {url}: {e}")
                             summary = article_data['content'][:500] + "..."
-                    except Exception as e:
-                        logger.error(f"Summary generation error for {url}: {e}")
-                        summary = article_data['content'][:500] + "..."
-                    
-                    # Generate embedding
-                    try:
-                        embedding = await get_embedding(summary)
-                    except Exception as e:
-                        logger.error(f"Embedding generation failed for {url}: {e}")
-                        continue
-                    
-                    # Store in ChromaDB (ensure no None values in metadata)
-                    try:
-                        article_id = str(uuid.uuid4())
-                        collection.add(
-                            ids=[article_id],
-                            embeddings=[embedding],
-                            documents=[summary],
-                            metadatas=[{
-                                "title": article_data['title'] or "Untitled",
-                                "url": article_data['url'],
-                                "date_published": article_data['date_published'] or "",
-                                "date_added": datetime.now().isoformat(),
-                                "public": bool(article_data['public']),
-                                "source": article_data['source'] or "Unknown"
-                            }]
-                        )
                         
-                        articles_added += 1
-                        logger.info(f"Added article: {article_data['title']}")
-                    except Exception as e:
-                        logger.error(f"ChromaDB storage failed for {url}: {e}")
-                        continue
+                        # Generate embedding
+                        try:
+                            embedding = await get_embedding(summary)
+                        except Exception as e:
+                            logger.error(f"Embedding generation failed for {url}: {e}")
+                            continue
+                        
+                        # Store full article with content
+                        try:
+                            article_id = str(uuid.uuid4())
+                            collection.add(
+                                ids=[article_id],
+                                embeddings=[embedding],
+                                documents=[summary],
+                                metadatas=[{
+                                    "title": article_data['title'] or "Untitled",
+                                    "url": article_data['url'],
+                                    "date_published": article_data['date_published'] or "",
+                                    "date_added": datetime.now().isoformat(),
+                                    "public": bool(article_data['public']),
+                                    "source": article_data['source'] or "Unknown",
+                                    "content_type": "full"
+                                }]
+                            )
+                            
+                            articles_added += 1
+                            logger.info(f"Added full article: {article_data['title']}")
+                        except Exception as e:
+                            logger.error(f"ChromaDB storage failed for {url}: {e}")
+                            continue
+                    else:
+                        # Scraping failed, store minimal article with search result data
+                        logger.info(f"Scraping failed for {url}, storing as link-only article: {search_title}")
+                        
+                        # Use search result body as summary if available, otherwise use title
+                        summary = search_body if search_body else f"External article: {search_title}"
+                        
+                        # Generate embedding for search result data
+                        try:
+                            embedding = await get_embedding(summary)
+                        except Exception as e:
+                            logger.error(f"Embedding generation failed for search result {url}: {e}")
+                            continue
+                        
+                        # Store link-only article
+                        try:
+                            article_id = str(uuid.uuid4())
+                            collection.add(
+                                ids=[article_id],
+                                embeddings=[embedding],
+                                documents=[summary],
+                                metadatas=[{
+                                    "title": search_title,
+                                    "url": url,
+                                    "date_published": "",
+                                    "date_added": datetime.now().isoformat(),
+                                    "public": True,  # Default to public for link-only articles
+                                    "source": urlparse(url).netloc,
+                                    "content_type": "link_only"
+                                }]
+                            )
+                            
+                            articles_added += 1
+                            logger.info(f"Added link-only article: {search_title}")
+                        except Exception as e:
+                            logger.error(f"ChromaDB storage failed for link-only article {url}: {e}")
+                            continue
                     
                 except Exception as e:
                     logger.error(f"Unexpected error processing {url}: {e}")
@@ -467,7 +511,8 @@ async def get_articles():
                 date_published=metadata.get('date_published'),
                 date_added=metadata['date_added'],
                 public=metadata['public'],
-                source=metadata['source']
+                source=metadata['source'],
+                content_type=metadata.get('content_type', 'full')
             ))
         
         # Sort by date_added (newest first)
