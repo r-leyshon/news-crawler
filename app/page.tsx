@@ -31,6 +31,7 @@ interface Article {
 export default function ArticleAssistant() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
+  const [searchKeywords, setSearchKeywords] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [isCrawling, setIsCrawling] = useState(false)
   const [articles, setArticles] = useState<Article[]>([])
@@ -61,8 +62,23 @@ export default function ArticleAssistant() {
   }
 
   const handleCrawl = async () => {
+    if (!searchKeywords.trim()) {
+      toast({
+        title: "Search Keywords Required",
+        description: "Please enter search keywords before starting a crawl.",
+        variant: "destructive",
+      })
+      return
+    }
+
     setIsCrawling(true)
     setCrawlStatus("Starting crawl...")
+
+    // Split keywords by comma and clean them up
+    const keywordList = searchKeywords
+      .split(',')
+      .map(keyword => keyword.trim())
+      .filter(keyword => keyword.length > 0)
 
     try {
       const response = await fetch(`${API_BASE}/crawl`, {
@@ -71,27 +87,27 @@ export default function ArticleAssistant() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          keywords: ["artificial intelligence", "machine learning", "technology news"],
+          keywords: keywordList,
           max_articles: 10,
         }),
       })
 
       if (response.ok) {
         const data = await response.json()
-        setCrawlStatus(`Crawl completed! Found ${data.articles_added} new articles.`)
+        setCrawlStatus(`Search & crawl completed! Found ${data.articles_added} new articles using DuckDuckGo.`)
         toast({
-          title: "Crawl Completed",
-          description: `Successfully added ${data.articles_added} new articles.`,
+          title: "Search & Crawl Completed",
+          description: `Successfully found and added ${data.articles_added} new articles.`,
         })
         fetchArticles()
       } else {
         throw new Error("Crawl failed")
       }
     } catch (error) {
-      setCrawlStatus("Crawl failed. Please try again.")
+      setCrawlStatus("Search & crawl failed. Please try again.")
       toast({
-        title: "Crawl Failed",
-        description: "There was an error during the crawling process.",
+        title: "Search & Crawl Failed",
+        description: "There was an error during the search and crawling process.",
         variant: "destructive",
       })
     } finally {
@@ -200,7 +216,7 @@ export default function ArticleAssistant() {
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-4xl font-bold text-gray-900 mb-2">AI-Powered News Discovery Assistant</h1>
-          <p className="text-gray-600">Discover, summarize, and chat with your curated article collection</p>
+          <p className="text-gray-600">Search the web, discover articles, and chat with your curated collection using DuckDuckGo</p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -210,24 +226,42 @@ export default function ArticleAssistant() {
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Globe className="h-5 w-5" />
-                  Crawl Control
+                  Web Search & Crawl
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <Button onClick={handleCrawl} disabled={isCrawling} className="w-full mb-4">
-                  {isCrawling ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Crawling...
-                    </>
-                  ) : (
-                    <>
-                      <Play className="mr-2 h-4 w-4" />
-                      Run Crawl
-                    </>
-                  )}
-                </Button>
-                {crawlStatus && <p className="text-sm text-gray-600">{crawlStatus}</p>}
+                <div className="space-y-4">
+                  <div>
+                    <label htmlFor="search-keywords" className="block text-sm font-medium text-gray-700 mb-2">
+                      Search Keywords
+                    </label>
+                    <Input
+                      id="search-keywords"
+                      value={searchKeywords}
+                      onChange={(e) => setSearchKeywords(e.target.value)}
+                      placeholder="e.g., artificial intelligence, machine learning, technology news"
+                      disabled={isCrawling}
+                      className="w-full"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Separate multiple keywords with commas
+                    </p>
+                  </div>
+                  <Button onClick={handleCrawl} disabled={isCrawling || !searchKeywords.trim()} className="w-full">
+                    {isCrawling ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Searching & Crawling...
+                      </>
+                    ) : (
+                      <>
+                        <Play className="mr-2 h-4 w-4" />
+                        Search & Crawl Articles
+                      </>
+                    )}
+                  </Button>
+                  {crawlStatus && <p className="text-sm text-gray-600 mt-2">{crawlStatus}</p>}
+                </div>
               </CardContent>
             </Card>
 
@@ -241,7 +275,7 @@ export default function ArticleAssistant() {
               </CardHeader>
               <CardContent className="max-h-96 overflow-y-auto">
                 {articles.length === 0 ? (
-                  <p className="text-gray-500 text-sm">No articles yet. Run a crawl to get started!</p>
+                  <p className="text-gray-500 text-sm">No articles yet. Enter search keywords and run a search to get started!</p>
                 ) : (
                   <div className="space-y-3">
                     {articles.slice(0, 10).map((article) => (
@@ -287,7 +321,7 @@ export default function ArticleAssistant() {
                     <div className="text-center text-gray-500 mt-8">
                       <MessageCircle className="h-12 w-12 mx-auto mb-4 opacity-50" />
                       <p>Start a conversation about your articles!</p>
-                      <p className="text-sm mt-2">Try asking: "What are the main topics in recent articles?"</p>
+                      <p className="text-sm mt-2">Try asking: "What are the main topics in recent articles?" or "Summarize the latest AI developments"</p>
                     </div>
                   ) : (
                     messages.map((message) => (
