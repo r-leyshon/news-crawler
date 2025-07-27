@@ -71,8 +71,13 @@ class CrawlRequest(BaseModel):
     keywords: List[str]
     max_articles: int = 10
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
 class QuestionRequest(BaseModel):
     question: str
+    messages: Optional[List[ChatMessage]] = []
 
 class Article(BaseModel):
     id: str
@@ -397,20 +402,33 @@ async def ask_question(request: QuestionRequest):
         
         context = "\n".join(context_parts)
         
+        # Build conversation messages with context
+        conversation_messages = [
+            {
+                "role": "system", 
+                "content": f"You are an AI assistant that answers questions based on a collection of articles. Some articles have full summaries, while others are external links with titles only. Use only the information provided to answer questions. For external link articles, acknowledge that you only have the title and suggest the user click the link to read more. Always be helpful and cite which articles you're referencing.\n\nAvailable Articles:\n{context}"
+            }
+        ]
+        
+        # Add conversation history if provided
+        if request.messages:
+            for msg in request.messages:
+                conversation_messages.append({
+                    "role": msg.role,
+                    "content": msg.content
+                })
+        
+        # Add the current question
+        conversation_messages.append({
+            "role": "user", 
+            "content": request.question
+        })
+        
         # Generate answer using Azure OpenAI
         response = await asyncio.wait_for(
             openai_client.chat.completions.create(
                 model=CHAT_DEPLOYMENT_NAME,
-                                    messages=[
-                        {
-                            "role": "system", 
-                            "content": "You are an AI assistant that answers questions based on a collection of articles. Some articles have full summaries, while others are external links with titles only. Use only the information provided to answer questions. For external link articles, acknowledge that you only have the title and suggest the user click the link to read more. Always be helpful and cite which articles you're referencing."
-                        },
-                    {
-                        "role": "user", 
-                        "content": f"Articles:\n{context}\n\nQuestion: {request.question}\n\nAnswer:"
-                    }
-                ],
+                messages=conversation_messages,
                 max_tokens=500,
                 temperature=0.3
             ),
@@ -461,20 +479,33 @@ async def ask_question_stream(request: QuestionRequest):
             
             context = "\n".join(context_parts)
             
+            # Build conversation messages with context
+            conversation_messages = [
+                {
+                    "role": "system", 
+                    "content": f"You are an AI assistant that answers questions based on a collection of articles. Some articles have full summaries, while others are external links with titles only. Use only the information provided to answer questions. For external link articles, acknowledge that you only have the title and suggest the user click the link to read more. Always be helpful and cite which articles you're referencing.\n\nAvailable Articles:\n{context}"
+                }
+            ]
+            
+            # Add conversation history if provided
+            if request.messages:
+                for msg in request.messages:
+                    conversation_messages.append({
+                        "role": msg.role,
+                        "content": msg.content
+                    })
+            
+            # Add the current question
+            conversation_messages.append({
+                "role": "user", 
+                "content": request.question
+            })
+            
             # Generate streaming answer using Azure OpenAI
             stream = await asyncio.wait_for(
                 openai_client.chat.completions.create(
                     model=CHAT_DEPLOYMENT_NAME,
-                    messages=[
-                        {
-                            "role": "system", 
-                            "content": "You are an AI assistant that answers questions based on a collection of articles. Some articles have full summaries, while others are external links with titles only. Use only the information provided to answer questions. For external link articles, acknowledge that you only have the title and suggest the user click the link to read more. Always be helpful and cite which articles you're referencing."
-                        },
-                        {
-                            "role": "user", 
-                            "content": f"Articles:\n{context}\n\nQuestion: {request.question}\n\nAnswer:"
-                        }
-                    ],
+                    messages=conversation_messages,
                     max_tokens=500,
                     temperature=0.3,
                     stream=True

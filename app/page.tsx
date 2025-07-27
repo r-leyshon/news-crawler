@@ -274,12 +274,21 @@ export default function ArticleAssistant() {
     setMessages((prev) => [...prev, assistantMessage])
 
     try {
+      // Prepare conversation history (exclude the current user message and the empty assistant message just added)
+      const conversationHistory = messages.slice(0, -2).map(msg => ({
+        role: msg.role,
+        content: msg.content
+      }))
+
       const response = await fetch(`${API_BASE}/ask/stream`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ question: questionInput }),
+        body: JSON.stringify({ 
+          question: questionInput,
+          messages: conversationHistory
+        }),
       })
 
       if (!response.ok) {
