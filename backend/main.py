@@ -381,13 +381,19 @@ async def ask_question(request: QuestionRequest):
             n_results=5
         )
         
-        if not results['documents'][0]:
+        if not results['documents'] or not results['documents'][0]:
             return {"answer": "I don't have any relevant articles to answer your question. Please run a crawl first to gather some articles."}
         
         # Prepare context from retrieved articles
         context_parts = []
         for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
-            context_parts.append(f"Article {i+1}: {metadata['title']}\nSummary: {doc}\nSource: {metadata['url']}\n")
+            # Handle both full articles and link-only articles
+            content_type = metadata.get('content_type', 'full')
+            if content_type == 'link_only':
+                article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nType: External link only\nSource: {metadata.get('url', 'Unknown')}\n"
+            else:
+                article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nSummary: {doc}\nSource: {metadata.get('url', 'Unknown')}\n"
+            context_parts.append(article_info)
         
         context = "\n".join(context_parts)
         
@@ -395,11 +401,11 @@ async def ask_question(request: QuestionRequest):
         response = await asyncio.wait_for(
             openai_client.chat.completions.create(
                 model=CHAT_DEPLOYMENT_NAME,
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": "You are an AI assistant that answers questions based on a collection of article summaries. Use only the information provided in the articles to answer questions. If the answer is not in the articles, say so. Always be helpful and cite which articles you're referencing when possible."
-                    },
+                                    messages=[
+                        {
+                            "role": "system", 
+                            "content": "You are an AI assistant that answers questions based on a collection of articles. Some articles have full summaries, while others are external links with titles only. Use only the information provided to answer questions. For external link articles, acknowledge that you only have the title and suggest the user click the link to read more. Always be helpful and cite which articles you're referencing."
+                        },
                     {
                         "role": "user", 
                         "content": f"Articles:\n{context}\n\nQuestion: {request.question}\n\nAnswer:"
@@ -437,7 +443,7 @@ async def ask_question_stream(request: QuestionRequest):
                 n_results=5
             )
             
-            if not results['documents'][0]:
+            if not results['documents'] or not results['documents'][0]:
                 no_articles_msg = "I don't have any relevant articles to answer your question. Please run a crawl first to gather some articles."
                 yield f"data: {json.dumps({'content': no_articles_msg, 'done': True})}\n\n"
                 return
@@ -445,7 +451,13 @@ async def ask_question_stream(request: QuestionRequest):
             # Prepare context from retrieved articles
             context_parts = []
             for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
-                context_parts.append(f"Article {i+1}: {metadata['title']}\nSummary: {doc}\nSource: {metadata['url']}\n")
+                # Handle both full articles and link-only articles
+                content_type = metadata.get('content_type', 'full')
+                if content_type == 'link_only':
+                    article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nType: External link only\nSource: {metadata.get('url', 'Unknown')}\n"
+                else:
+                    article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nSummary: {doc}\nSource: {metadata.get('url', 'Unknown')}\n"
+                context_parts.append(article_info)
             
             context = "\n".join(context_parts)
             
@@ -456,7 +468,7 @@ async def ask_question_stream(request: QuestionRequest):
                     messages=[
                         {
                             "role": "system", 
-                            "content": "You are an AI assistant that answers questions based on a collection of article summaries. Use only the information provided in the articles to answer questions. If the answer is not in the articles, say so. Always be helpful and cite which articles you're referencing when possible."
+                            "content": "You are an AI assistant that answers questions based on a collection of articles. Some articles have full summaries, while others are external links with titles only. Use only the information provided to answer questions. For external link articles, acknowledge that you only have the title and suggest the user click the link to read more. Always be helpful and cite which articles you're referencing."
                         },
                         {
                             "role": "user", 
@@ -471,7 +483,7 @@ async def ask_question_stream(request: QuestionRequest):
             )
             
             async for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
+                if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content is not None:
                     content = chunk.choices[0].delta.content
                     yield f"data: {json.dumps({'content': content, 'done': False})}\n\n"
             

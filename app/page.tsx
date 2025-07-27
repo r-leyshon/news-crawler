@@ -42,6 +42,137 @@ export default function ArticleAssistant() {
 
   const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
+  // Function to render text with clickable links and basic markdown
+  const renderTextWithLinks = (text: string, isUser: boolean = false) => {
+    const urlRegex = /(https?:\/\/[^\s\]]+)/g
+    const parts = text.split(urlRegex)
+    
+    return parts.map((part, index) => {
+      if (urlRegex.test(part)) {
+        return (
+          <a
+            key={index}
+            href={part}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`underline break-all ${
+              isUser 
+                ? "text-blue-100 hover:text-white" 
+                : "text-blue-600 hover:text-blue-800"
+            }`}
+          >
+            {part}
+          </a>
+        )
+      }
+      return part
+    })
+  }
+
+  // Function to render markdown formatting
+  const renderMarkdown = (text: string) => {
+    const lines = text.split('\n')
+    const elements: JSX.Element[] = []
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      
+      // Handle numbered lists
+      if (line.match(/^\d+\.\s/)) {
+        const listItems = []
+        let j = i
+        while (j < lines.length && lines[j].match(/^\d+\.\s/)) {
+          const content = lines[j].replace(/^\d+\.\s/, '')
+          listItems.push(
+            <li key={j} className="mb-1">
+              {renderInlineMarkdown(content)}
+            </li>
+          )
+          j++
+        }
+        elements.push(
+          <ol key={i} className="mb-2 pl-4 list-decimal">
+            {listItems}
+          </ol>
+        )
+        i = j - 1
+        continue
+      }
+      
+      // Handle bullet lists
+      if (line.match(/^[\*\-\+]\s/)) {
+        const listItems = []
+        let j = i
+        while (j < lines.length && lines[j].match(/^[\*\-\+]\s/)) {
+          const content = lines[j].replace(/^[\*\-\+]\s/, '')
+          listItems.push(
+            <li key={j} className="mb-1">
+              {renderInlineMarkdown(content)}
+            </li>
+          )
+          j++
+        }
+        elements.push(
+          <ul key={i} className="mb-2 pl-4 list-disc">
+            {listItems}
+          </ul>
+        )
+        i = j - 1
+        continue
+      }
+      
+      // Handle regular paragraphs
+      if (line.trim() !== '') {
+        elements.push(
+          <p key={i} className="mb-2 last:mb-0">
+            {renderInlineMarkdown(line)}
+          </p>
+        )
+      }
+    }
+    
+    return elements
+  }
+
+  // Function to handle inline markdown (bold, italic, links)
+  const renderInlineMarkdown = (text: string) => {
+    const parts = []
+    let remaining = text
+    let key = 0
+    
+    while (remaining.length > 0) {
+      // Handle bold text **text**
+      const boldMatch = remaining.match(/\*\*(.*?)\*\*/)
+      if (boldMatch) {
+        const beforeBold = remaining.substring(0, boldMatch.index)
+        if (beforeBold) {
+          parts.push(<span key={key++}>{renderTextWithLinks(beforeBold)}</span>)
+        }
+        parts.push(<strong key={key++} className="font-semibold">{boldMatch[1]}</strong>)
+        remaining = remaining.substring(boldMatch.index! + boldMatch[0].length)
+        continue
+      }
+      
+      // Handle italic text *text*
+      const italicMatch = remaining.match(/\*(.*?)\*/)
+      if (italicMatch) {
+        const beforeItalic = remaining.substring(0, italicMatch.index)
+        if (beforeItalic) {
+          parts.push(<span key={key++}>{renderTextWithLinks(beforeItalic)}</span>)
+        }
+        parts.push(<em key={key++} className="italic">{italicMatch[1]}</em>)
+        remaining = remaining.substring(italicMatch.index! + italicMatch[0].length)
+        continue
+      }
+      
+      // No more markdown, add the rest
+      parts.push(<span key={key++}>{renderTextWithLinks(remaining)}</span>)
+      break
+    }
+    
+    return parts
+  }
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages])
@@ -212,18 +343,18 @@ export default function ArticleAssistant() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
-      <div className="max-w-7xl mx-auto">
+    <div className="h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 overflow-hidden">
+      <div className="max-w-7xl mx-auto h-full flex flex-col">
         {/* Header */}
-        <div className="mb-8">
+        <div className="mb-6 flex-shrink-0">
           <h1 className="text-4xl font-bold text-gray-900 mb-2">AI-Powered News Discovery Assistant</h1>
           <p className="text-gray-600">Search the web, discover articles, and chat with your curated collection using DuckDuckGo</p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
           {/* Control Panel */}
-          <div className="lg:col-span-1">
-            <Card className="mb-6">
+          <div className="lg:col-span-1 flex flex-col min-h-0">
+            <Card className="mb-6 flex-shrink-0">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Globe className="h-5 w-5" />
@@ -267,7 +398,7 @@ export default function ArticleAssistant() {
             </Card>
 
             {/* Articles List */}
-            <Card>
+            <Card className="flex-1 flex flex-col min-h-0">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Calendar className="h-5 w-5" />
@@ -278,7 +409,7 @@ export default function ArticleAssistant() {
                   <span className="font-medium"> External Link:</span> Title only, click to read
                 </p>
               </CardHeader>
-              <CardContent className="max-h-96 overflow-y-auto">
+              <CardContent className="flex-1 overflow-y-auto min-h-0">
                 {articles.length === 0 ? (
                   <p className="text-gray-500 text-sm">No articles yet. Enter search keywords and run a search to get started!</p>
                 ) : (
@@ -323,17 +454,17 @@ export default function ArticleAssistant() {
           </div>
 
           {/* Chat Interface */}
-          <div className="lg:col-span-2">
-            <Card className="h-[600px] flex flex-col">
+          <div className="lg:col-span-2 flex flex-col min-h-0">
+            <Card className="flex-1 flex flex-col min-h-0">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <MessageCircle className="h-5 w-5" />
                   Chat with Your Articles
                 </CardTitle>
               </CardHeader>
-              <CardContent className="flex-1 flex flex-col">
+              <CardContent className="flex-1 flex flex-col min-h-0">
                 {/* Messages */}
-                <div className="flex-1 overflow-y-auto mb-4 space-y-4">
+                <div className="flex-1 overflow-y-auto mb-4 space-y-4 min-h-0">
                   {messages.length === 0 ? (
                     <div className="text-center text-gray-500 mt-8">
                       <MessageCircle className="h-12 w-12 mx-auto mb-4 opacity-50" />
@@ -351,7 +482,13 @@ export default function ArticleAssistant() {
                             message.role === "user" ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-900"
                           }`}
                         >
-                          <p className="whitespace-pre-wrap">{message.content}</p>
+                          {message.role === "user" ? (
+                            <p className="whitespace-pre-wrap">{renderTextWithLinks(message.content, true)}</p>
+                          ) : (
+                            <div className="prose prose-sm max-w-none">
+                              {renderMarkdown(message.content)}
+                            </div>
+                          )}
                           <p className={`text-xs mt-1 ${message.role === "user" ? "text-blue-100" : "text-gray-500"}`}>
                             {message.timestamp.toLocaleTimeString()}
                           </p>
@@ -377,7 +514,7 @@ export default function ArticleAssistant() {
                 </div>
 
                 {/* Input Form */}
-                <form onSubmit={handleSubmit} className="flex gap-2">
+                <form onSubmit={handleSubmit} className="flex gap-2 flex-shrink-0">
                   <Input
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
