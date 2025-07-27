@@ -409,9 +409,21 @@ export default function ArticleAssistant() {
             {/* Articles List */}
             <Card className="flex-1 flex flex-col min-h-0">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Calendar className="h-5 w-5" />
-                  Recent Articles ({articles.length})
+                <CardTitle className="flex items-center gap-2 justify-between">
+                  <div className="flex items-center gap-2">
+                    <Calendar className="h-5 w-5" />
+                    Recent Articles ({Math.min(10, articles.length)} of {articles.length})
+                  </div>
+                  {articles.length > 10 && (
+                    <Button 
+                      variant="outline" 
+                      size="sm"
+                      onClick={() => window.open('/articles', '_blank')}
+                      className="text-xs"
+                    >
+                      View All {articles.length}
+                    </Button>
+                  )}
                 </CardTitle>
                 <p className="text-xs text-gray-500 mt-1">
                   <span className="font-medium">Full Article:</span> Content scraped & summarized • 
