@@ -27,9 +27,13 @@ export default function ArticlesPage() {
   const [filteredArticles, setFilteredArticles] = useState<Article[]>([])
   const [searchTerm, setSearchTerm] = useState("")
   const [filterType, setFilterType] = useState<"all" | "full" | "link_only">("all")
+  const [regionFilter, setRegionFilter] = useState<"all" | string>("all")
   const [isLoading, setIsLoading] = useState(true)
 
   const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+
+  // Get unique regions from articles for filter dropdown
+  const uniqueRegions = Array.from(new Set(articles.map(article => article.region).filter((region): region is string => Boolean(region))))
 
   useEffect(() => {
     fetchArticles()
@@ -44,6 +48,11 @@ export default function ArticlesPage() {
       filtered = filtered.filter(article => article.content_type === filterType)
     }
 
+    // Filter by region
+    if (regionFilter !== "all") {
+      filtered = filtered.filter(article => article.region === regionFilter)
+    }
+
     // Search by title, source, or summary
     if (searchTerm) {
       const search = searchTerm.toLowerCase()
@@ -55,7 +64,7 @@ export default function ArticlesPage() {
     }
 
     setFilteredArticles(filtered)
-  }, [articles, searchTerm, filterType])
+  }, [articles, searchTerm, filterType, regionFilter])
 
   const fetchArticles = async () => {
     try {
@@ -136,9 +145,24 @@ export default function ArticlesPage() {
                 onChange={(e) => setFilterType(e.target.value as "all" | "full" | "link_only")}
                 className="px-3 py-2 border border-gray-300 rounded-md bg-white text-sm"
               >
-                <option value="all">All Articles</option>
+                <option value="all">All Types</option>
                 <option value="full">Full Articles</option>
                 <option value="link_only">External Links</option>
+              </select>
+              <select 
+                value={regionFilter}
+                onChange={(e) => setRegionFilter(e.target.value)}
+                className="px-3 py-2 border border-gray-300 rounded-md bg-white text-sm"
+              >
+                <option value="all">All Regions</option>
+                {uniqueRegions.map((region) => {
+                  const regionInfo = getRegionInfo(region)
+                  return (
+                    <option key={region} value={region}>
+                      {regionInfo ? `${regionInfo.flag} ${regionInfo.name}` : region}
+                    </option>
+                  )
+                })}
               </select>
             </div>
           </div>
@@ -154,10 +178,10 @@ export default function ArticlesPage() {
           <div className="text-center py-12">
             <Calendar className="h-12 w-12 mx-auto text-gray-400 mb-4" />
             <h3 className="text-lg font-medium text-gray-900 mb-2">
-              {searchTerm || filterType !== "all" ? "No articles found" : "No articles yet"}
+              {searchTerm || filterType !== "all" || regionFilter !== "all" ? "No articles found" : "No articles yet"}
             </h3>
             <p className="text-gray-600">
-              {searchTerm || filterType !== "all" 
+              {searchTerm || filterType !== "all" || regionFilter !== "all"
                 ? "Try adjusting your search or filter criteria." 
                 : "Run a web search to discover and add articles to your collection."
               }
