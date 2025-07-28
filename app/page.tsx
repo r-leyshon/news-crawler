@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, Play, MessageCircle, Globe, Calendar, ExternalLink } from "lucide-react"
+import { Loader2, Play, MessageCircle, Globe, Calendar, ExternalLink, ChevronDown, ChevronUp, Settings } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 
 interface Message {
@@ -33,6 +33,17 @@ export default function ArticleAssistant() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [searchKeywords, setSearchKeywords] = useState("")
+  const [showAdvancedSearch, setShowAdvancedSearch] = useState(false)
+  const [advancedSearch, setAdvancedSearch] = useState({
+    requiredTerms: "",
+    excludedTerms: "",
+    exactPhrase: "",
+    fileType: "",
+    includeSite: "",
+    excludeSite: "",
+    inTitle: "",
+    inUrl: ""
+  })
   const [isLoading, setIsLoading] = useState(false)
   const [isCrawling, setIsCrawling] = useState(false)
   const [articles, setArticles] = useState<Article[]>([])
@@ -41,6 +52,60 @@ export default function ArticleAssistant() {
   const { toast } = useToast()
 
   const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+
+  // Function to build search query with advanced operators
+  const buildSearchQuery = () => {
+    const parts = []
+    
+    // Basic keywords
+    if (searchKeywords.trim()) {
+      parts.push(searchKeywords.trim())
+    }
+    
+    // Required terms (+ operator)
+    if (advancedSearch.requiredTerms.trim()) {
+      const required = advancedSearch.requiredTerms.split(',').map(term => `+${term.trim()}`).join(' ')
+      parts.push(required)
+    }
+    
+    // Excluded terms (- operator) 
+    if (advancedSearch.excludedTerms.trim()) {
+      const excluded = advancedSearch.excludedTerms.split(',').map(term => `-${term.trim()}`).join(' ')
+      parts.push(excluded)
+    }
+    
+    // Exact phrase (quotes)
+    if (advancedSearch.exactPhrase.trim()) {
+      parts.push(`"${advancedSearch.exactPhrase.trim()}"`)
+    }
+    
+    // File type
+    if (advancedSearch.fileType.trim()) {
+      parts.push(`filetype:${advancedSearch.fileType.trim()}`)
+    }
+    
+    // Include site
+    if (advancedSearch.includeSite.trim()) {
+      parts.push(`site:${advancedSearch.includeSite.trim()}`)
+    }
+    
+    // Exclude site
+    if (advancedSearch.excludeSite.trim()) {
+      parts.push(`-site:${advancedSearch.excludeSite.trim()}`)
+    }
+    
+    // In title
+    if (advancedSearch.inTitle.trim()) {
+      parts.push(`intitle:${advancedSearch.inTitle.trim()}`)
+    }
+    
+    // In URL
+    if (advancedSearch.inUrl.trim()) {
+      parts.push(`inurl:${advancedSearch.inUrl.trim()}`)
+    }
+    
+    return parts.join(' ')
+  }
 
   // Function to render text with clickable links and basic markdown
   const renderTextWithLinks = (text: string, isUser: boolean = false) => {
@@ -194,23 +259,19 @@ export default function ArticleAssistant() {
   }
 
   const handleCrawl = async () => {
-    if (!searchKeywords.trim()) {
+    const searchQuery = buildSearchQuery()
+    
+    if (!searchQuery.trim()) {
       toast({
         title: "Search Keywords Required",
-        description: "Please enter search keywords before starting a crawl.",
+        description: "Please enter search keywords or advanced search criteria before starting a crawl.",
         variant: "destructive",
       })
       return
     }
 
     setIsCrawling(true)
-    setCrawlStatus("Starting crawl...")
-
-    // Split keywords by comma and clean them up
-    const keywordList = searchKeywords
-      .split(',')
-      .map(keyword => keyword.trim())
-      .filter(keyword => keyword.length > 0)
+    setCrawlStatus(`Starting search with: "${searchQuery}"`)
 
     try {
       const response = await fetch(`${API_BASE}/crawl`, {
@@ -219,7 +280,7 @@ export default function ArticleAssistant() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          keywords: keywordList,
+          keywords: [searchQuery], // Send as single query string with operators
           max_articles: 10,
         }),
       })
@@ -357,7 +418,7 @@ export default function ArticleAssistant() {
         {/* Header */}
         <div className="mb-6 flex-shrink-0">
           <h1 className="text-4xl font-bold text-gray-900 mb-2">AI-Powered News Discovery Assistant</h1>
-          <p className="text-gray-600">Search the web, discover articles, and chat with your curated collection using DuckDuckGo</p>
+          <p className="text-gray-600">Search the web with advanced operators, discover articles, and chat with your curated collection using DuckDuckGo</p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
@@ -388,7 +449,166 @@ export default function ArticleAssistant() {
                       Separate multiple keywords with commas
                     </p>
                   </div>
-                  <Button onClick={handleCrawl} disabled={isCrawling || !searchKeywords.trim()} className="w-full">
+                  
+                  {/* Advanced Search Toggle */}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowAdvancedSearch(!showAdvancedSearch)}
+                    className="w-full justify-between text-xs"
+                  >
+                    <span className="flex items-center gap-1">
+                      <Settings className="h-3 w-3" />
+                      Advanced Search Options
+                    </span>
+                    {showAdvancedSearch ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                  </Button>
+                  
+                  {/* Advanced Search Fields */}
+                  {showAdvancedSearch && (
+                    <div className="space-y-3 pt-2 border-t">
+                      <div className="grid grid-cols-1 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Must Include (+)
+                          </label>
+                          <Input
+                            value={advancedSearch.requiredTerms}
+                            onChange={(e) => setAdvancedSearch(prev => ({...prev, requiredTerms: e.target.value}))}
+                            placeholder="AI, justice (comma-separated)"
+                            className="text-xs"
+                            disabled={isCrawling}
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Must Exclude (-)
+                          </label>
+                          <Input
+                            value={advancedSearch.excludedTerms}
+                            onChange={(e) => setAdvancedSearch(prev => ({...prev, excludedTerms: e.target.value}))}
+                            placeholder="sports, entertainment (comma-separated)"
+                            className="text-xs"
+                            disabled={isCrawling}
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Exact Phrase
+                          </label>
+                          <Input
+                            value={advancedSearch.exactPhrase}
+                            onChange={(e) => setAdvancedSearch(prev => ({...prev, exactPhrase: e.target.value}))}
+                            placeholder="artificial intelligence law"
+                            className="text-xs"
+                            disabled={isCrawling}
+                          />
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-xs font-medium text-gray-700 mb-1">
+                              File Type
+                            </label>
+                            <select
+                              value={advancedSearch.fileType}
+                              onChange={(e) => setAdvancedSearch(prev => ({...prev, fileType: e.target.value}))}
+                              className="w-full px-2 py-1 text-xs border border-gray-300 rounded-md bg-white"
+                              disabled={isCrawling}
+                            >
+                              <option value="">Any</option>
+                              <option value="pdf">PDF</option>
+                              <option value="doc">DOC</option>
+                              <option value="docx">DOCX</option>
+                              <option value="html">HTML</option>
+                            </select>
+                          </div>
+                          
+                          <div>
+                            <label className="block text-xs font-medium text-gray-700 mb-1">
+                              In Title
+                            </label>
+                            <Input
+                              value={advancedSearch.inTitle}
+                              onChange={(e) => setAdvancedSearch(prev => ({...prev, inTitle: e.target.value}))}
+                              placeholder="justice"
+                              className="text-xs"
+                              disabled={isCrawling}
+                            />
+                          </div>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-xs font-medium text-gray-700 mb-1">
+                              Include Site
+                            </label>
+                            <Input
+                              value={advancedSearch.includeSite}
+                              onChange={(e) => setAdvancedSearch(prev => ({...prev, includeSite: e.target.value}))}
+                              placeholder="gov.uk"
+                              className="text-xs"
+                              disabled={isCrawling}
+                            />
+                          </div>
+                          
+                          <div>
+                            <label className="block text-xs font-medium text-gray-700 mb-1">
+                              Exclude Site
+                            </label>
+                            <Input
+                              value={advancedSearch.excludeSite}
+                              onChange={(e) => setAdvancedSearch(prev => ({...prev, excludeSite: e.target.value}))}
+                              placeholder="reddit.com"
+                              className="text-xs"
+                              disabled={isCrawling}
+                            />
+                          </div>
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            In URL
+                          </label>
+                          <Input
+                            value={advancedSearch.inUrl}
+                            onChange={(e) => setAdvancedSearch(prev => ({...prev, inUrl: e.target.value}))}
+                            placeholder="news"
+                            className="text-xs"
+                            disabled={isCrawling}
+                          />
+                        </div>
+                      </div>
+                      
+                      <div className="text-xs text-gray-500 bg-gray-50 p-2 rounded">
+                        <strong>Preview:</strong> {buildSearchQuery() || "Enter search criteria above"}
+                      </div>
+                      
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setAdvancedSearch({
+                          requiredTerms: "",
+                          excludedTerms: "",
+                          exactPhrase: "",
+                          fileType: "",
+                          includeSite: "",
+                          excludeSite: "",
+                          inTitle: "",
+                          inUrl: ""
+                        })}
+                        className="w-full text-xs"
+                        disabled={isCrawling}
+                      >
+                        Clear Advanced Options
+                      </Button>
+                    </div>
+                  )}
+                  <Button onClick={handleCrawl} disabled={isCrawling || !buildSearchQuery().trim()} className="w-full">
                     {isCrawling ? (
                       <>
                         <Loader2 className="mr-2 h-4 w-4 animate-spin" />

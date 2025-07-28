@@ -232,7 +232,7 @@ async def search_web(keywords: List[str], max_results: int = 10) -> List[dict]:
         results = await asyncio.to_thread(
             ddgs_client.text,
             query,
-            region="us-en",
+            region="uk-en",
             safesearch="moderate",
             timelimit="m",  # Recent results from last month
             max_results=max_results,
