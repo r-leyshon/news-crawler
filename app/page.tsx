@@ -286,6 +286,7 @@ export default function ArticleAssistant() {
     try {
       // If multiple regions selected, we'll search each region separately
       let totalArticlesAdded = 0
+      let totalArticlesFiltered = 0
       const articlesPerRegion = Math.ceil(10 / selectedRegions.length)
       
       for (const region of selectedRegions) {
@@ -306,14 +307,16 @@ export default function ArticleAssistant() {
       if (response.ok) {
         const data = await response.json()
           totalArticlesAdded += data.articles_added
+          totalArticlesFiltered += (data.articles_filtered || 0)
         }
       }
 
              // Update status with combined results
-       setCrawlStatus(`Search completed! Found ${totalArticlesAdded} new articles from ${regionNames} using DuckDuckGo.`)
+       const filterMessage = totalArticlesFiltered > 0 ? ` (${totalArticlesFiltered} filtered for content)` : ""
+       setCrawlStatus(`Search completed! Found ${totalArticlesAdded} new articles from ${regionNames}${filterMessage}.`)
         toast({
          title: "Multi-Region Search Completed",
-         description: `Successfully found and added ${totalArticlesAdded} new articles from ${selectedRegions.length} region(s).`,
+         description: `Successfully found and added ${totalArticlesAdded} new articles from ${selectedRegions.length} region(s).${filterMessage}`,
         })
         fetchArticles()
     } catch (error) {

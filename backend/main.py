@@ -93,6 +93,73 @@ class Article(BaseModel):
     region: Optional[str] = None
 
 # Helper Functions
+
+async def filter_inappropriate_content(content: str, title: str = "") -> dict:
+    """
+    Use OpenAI to analyze content for inappropriate material
+    Returns: {"is_safe": bool, "reason": str}
+    """
+    try:
+        # Prepare content for analysis (truncate if too long)
+        analysis_text = content[:3000] + ("..." if len(content) > 3000 else "")
+        if title:
+            analysis_text = f"Title: {title}\n\nContent: {analysis_text}"
+        
+        # Define the response schema for structured output
+        CONTENT_FILTER_SCHEMA = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "content_moderation_response",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "is_safe": {"type": "boolean"},
+                        "reason": {"type": "string"}
+                    },
+                    "required": ["is_safe", "reason"],
+                    "additionalProperties": False
+                },
+                "strict": True
+            }
+        }
+        
+        # Use OpenAI to analyze content appropriateness
+        prompt = f"""Analyze the following content for appropriateness in a professional work environment. 
+
+Consider the content inappropriate if it contains:
+- Explicit sexual content or imagery descriptions
+- Adult/pornographic material
+- Graphic violence or disturbing content
+- Hate speech or discriminatory content
+- Content clearly intended for adult entertainment
+- Gambling or illegal activities promotion
+
+Content to analyze:
+{analysis_text}"""
+        
+        response = await asyncio.wait_for(
+            openai_client.chat.completions.create(
+                model=CHAT_DEPLOYMENT_NAME,
+                messages=[
+                    {"role": "system", "content": "You are a content moderation assistant. Analyze content for workplace appropriateness."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=CONTENT_FILTER_SCHEMA,
+                max_tokens=100,
+                temperature=0.1
+            ),
+            timeout=15.0
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        result = json.loads(result_text)
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Content filtering error: {e}")
+        # Default to safe if filtering fails to avoid blocking legitimate content
+        return {"is_safe": True, "reason": f"Filter error: {str(e)}"}
 async def get_embedding(text: str) -> List[float]:
     """Generate embedding using Azure OpenAI"""
     try:
@@ -267,6 +334,7 @@ async def crawl_articles(request: CrawlRequest):
         search_results = await search_web(request.keywords, request.max_articles, request.region)
         
         articles_added = 0
+        articles_filtered = 0
         
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             for search_result in search_results:
@@ -287,7 +355,22 @@ async def crawl_articles(request: CrawlRequest):
                     article_data = await scrape_article(session, url)
                     
                     if article_data:
-                        # Full article scraped successfully
+                        # Full article scraped successfully - now filter for inappropriate content
+                        try:
+                            filter_result = await filter_inappropriate_content(
+                                article_data['content'], 
+                                article_data['title']
+                            )
+                            
+                            if not filter_result['is_safe']:
+                                logger.warning(f"Content filtered out: {url} - {filter_result['reason']}")
+                                articles_filtered += 1
+                                continue  # Skip this article entirely
+                            
+                        except Exception as e:
+                            logger.error(f"Content filtering error for {url}: {e}")
+                            # Continue with article if filter fails to avoid blocking legitimate content
+                        
                         try:
                             summary = await generate_summary(article_data['content'])
                             if not summary or summary.startswith("Summary generation"):
@@ -332,6 +415,20 @@ async def crawl_articles(request: CrawlRequest):
                         # Scraping failed, store minimal article with search result data
                         logger.info(f"Scraping failed for {url}, storing as link-only article: {search_title}")
                         
+                        # Filter search result content for appropriateness
+                        search_content_to_check = f"{search_title}\n{search_body}" if search_body else search_title
+                        try:
+                            filter_result = await filter_inappropriate_content(search_content_to_check, search_title)
+                            
+                            if not filter_result['is_safe']:
+                                logger.warning(f"Search result filtered out: {url} - {filter_result['reason']}")
+                                articles_filtered += 1
+                                continue  # Skip this search result entirely
+                                
+                        except Exception as e:
+                            logger.error(f"Content filtering error for search result {url}: {e}")
+                            # Continue with search result if filter fails
+                        
                         # Use search result body as summary if available, otherwise use title
                         summary = search_body if search_body else f"External article: {search_title}"
                         
@@ -371,7 +468,11 @@ async def crawl_articles(request: CrawlRequest):
                     logger.error(f"Unexpected error processing {url}: {e}")
                     continue
         
-        return {"message": "Crawl completed", "articles_added": articles_added}
+        return {
+            "message": "Crawl completed", 
+            "articles_added": articles_added,
+            "articles_filtered": articles_filtered
+        }
         
     except Exception as e:
         logger.error(f"Crawl error: {e}")
