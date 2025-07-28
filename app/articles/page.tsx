@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { ArrowLeft, ExternalLink, Search, Calendar, Filter } from "lucide-react"
+import { availableRegions, getRegionInfo } from "@/lib/regions"
 
 interface Article {
   id: string
@@ -18,6 +19,7 @@ interface Article {
   public: boolean
   source: string
   content_type?: string
+  region?: string
 }
 
 export default function ArticlesPage() {
@@ -198,6 +200,11 @@ export default function ArticlesPage() {
                       {new Date(article.date_added).toLocaleDateString()}
                     </div>
                     <div>Source: {article.source}</div>
+                    {article.region && (
+                      <div className="flex items-center gap-1">
+                        Region: {getRegionInfo(article.region)?.flag} {getRegionInfo(article.region)?.name}
+                      </div>
+                    )}
                     {article.date_published && (
                       <div>Published: {new Date(article.date_published).toLocaleDateString()}</div>
                     )}

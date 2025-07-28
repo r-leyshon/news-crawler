@@ -70,6 +70,7 @@ collection = chroma_client.get_or_create_collection(
 class CrawlRequest(BaseModel):
     keywords: List[str]
     max_articles: int = 10
+    region: Optional[str] = "uk-en"
 
 class ChatMessage(BaseModel):
     role: str
@@ -89,6 +90,7 @@ class Article(BaseModel):
     public: bool
     source: str
     content_type: Optional[str] = None
+    region: Optional[str] = None
 
 # Helper Functions
 async def get_embedding(text: str) -> List[float]:
@@ -221,7 +223,7 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[d
         logger.error(f"Error scraping {url}: {e}")
         return None
 
-async def search_web(keywords: List[str], max_results: int = 10) -> List[dict]:
+async def search_web(keywords: List[str], max_results: int = 10, region: str = "uk-en") -> List[dict]:
     """Search web using DuckDuckGo"""
     try:
         # Construct search query
@@ -232,7 +234,7 @@ async def search_web(keywords: List[str], max_results: int = 10) -> List[dict]:
         results = await asyncio.to_thread(
             ddgs_client.text,
             query,
-            region="uk-en",
+            region=region,
             safesearch="moderate",
             timelimit="m",  # Recent results from last month
             max_results=max_results,
@@ -262,7 +264,7 @@ async def crawl_articles(request: CrawlRequest):
     """Crawl web for articles based on keywords"""
     try:
         # Search for articles
-        search_results = await search_web(request.keywords, request.max_articles)
+        search_results = await search_web(request.keywords, request.max_articles, request.region)
         
         articles_added = 0
         
@@ -316,7 +318,8 @@ async def crawl_articles(request: CrawlRequest):
                                     "date_added": datetime.now().isoformat(),
                                     "public": bool(article_data['public']),
                                     "source": article_data['source'] or "Unknown",
-                                    "content_type": "full"
+                                    "content_type": "full",
+                                    "region": request.region
                                 }]
                             )
                             
@@ -353,7 +356,8 @@ async def crawl_articles(request: CrawlRequest):
                                     "date_added": datetime.now().isoformat(),
                                     "public": True,  # Default to public for link-only articles
                                     "source": urlparse(url).netloc,
-                                    "content_type": "link_only"
+                                    "content_type": "link_only",
+                                    "region": request.region
                                 }]
                             )
                             
@@ -555,7 +559,8 @@ async def get_articles():
                 date_added=metadata['date_added'],
                 public=metadata['public'],
                 source=metadata['source'],
-                content_type=metadata.get('content_type', 'full')
+                content_type=metadata.get('content_type', 'full'),
+                region=metadata.get('region')
             ))
         
         # Sort by date_added (newest first)

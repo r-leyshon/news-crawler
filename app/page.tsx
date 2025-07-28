@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Loader2, Play, MessageCircle, Globe, Calendar, ExternalLink, ChevronDown, ChevronUp, Settings } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
+import { availableRegions, getRegionInfo } from "@/lib/regions"
 
 interface Message {
   id: string
@@ -17,17 +18,18 @@ interface Message {
   timestamp: Date
 }
 
-interface Article {
-  id: string
-  title: string
-  url: string
-  summary?: string
-  date_published?: string
-  date_added: string
-  public: boolean
-  source: string
-  content_type?: string
-}
+  interface Article {
+    id: string
+    title: string
+    url: string
+    summary?: string
+    date_published?: string
+    date_added: string
+    public: boolean
+    source: string
+    content_type?: string
+    region?: string
+  }
 
 export default function ArticleAssistant() {
   const [messages, setMessages] = useState<Message[]>([])
@@ -42,7 +44,8 @@ export default function ArticleAssistant() {
     includeSite: "",
     excludeSite: "",
     inTitle: "",
-    inUrl: ""
+    inUrl: "",
+    regions: ["uk-en"] // Default to UK
   })
   const [isLoading, setIsLoading] = useState(false)
   const [isCrawling, setIsCrawling] = useState(false)
@@ -52,6 +55,8 @@ export default function ArticleAssistant() {
   const { toast } = useToast()
 
   const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+
+
 
   // Function to build search query with advanced operators
   const buildSearchQuery = () => {
@@ -264,43 +269,58 @@ export default function ArticleAssistant() {
     if (!searchQuery.trim()) {
       toast({
         title: "Search Keywords Required",
-        description: "Please enter search keywords or advanced search criteria before starting a crawl.",
+        description: "Please enter search keywords or advanced search criteria before discovering articles.",
         variant: "destructive",
       })
       return
     }
 
     setIsCrawling(true)
-    setCrawlStatus(`Starting search with: "${searchQuery}"`)
+    const selectedRegions = advancedSearch.regions
+    const regionNames = selectedRegions.map(code => 
+      availableRegions.find(r => r.code === code)?.name || code
+    ).join(", ")
+    
+    setCrawlStatus(`Starting search in ${regionNames} with: "${searchQuery}"`)
 
     try {
+      // If multiple regions selected, we'll search each region separately
+      let totalArticlesAdded = 0
+      const articlesPerRegion = Math.ceil(10 / selectedRegions.length)
+      
+      for (const region of selectedRegions) {
+        setCrawlStatus(`Searching ${availableRegions.find(r => r.code === region)?.name || region}...`)
+        
       const response = await fetch(`${API_BASE}/crawl`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          keywords: [searchQuery], // Send as single query string with operators
-          max_articles: 10,
+            keywords: [searchQuery],
+            max_articles: articlesPerRegion,
+            region: region
         }),
       })
 
       if (response.ok) {
         const data = await response.json()
-        setCrawlStatus(`Search & crawl completed! Found ${data.articles_added} new articles using DuckDuckGo.`)
+          totalArticlesAdded += data.articles_added
+        }
+      }
+
+             // Update status with combined results
+       setCrawlStatus(`Search completed! Found ${totalArticlesAdded} new articles from ${regionNames} using DuckDuckGo.`)
         toast({
-          title: "Search & Crawl Completed",
-          description: `Successfully found and added ${data.articles_added} new articles.`,
+         title: "Multi-Region Search Completed",
+         description: `Successfully found and added ${totalArticlesAdded} new articles from ${selectedRegions.length} region(s).`,
         })
         fetchArticles()
-      } else {
-        throw new Error("Crawl failed")
-      }
     } catch (error) {
-      setCrawlStatus("Search & crawl failed. Please try again.")
-      toast({
-        title: "Search & Crawl Failed",
-        description: "There was an error during the search and crawling process.",
+              setCrawlStatus("Article discovery failed. Please try again.")
+        toast({
+          title: "Article Discovery Failed",
+          description: "There was an error during the article discovery process.",
         variant: "destructive",
       })
     } finally {
@@ -418,20 +438,20 @@ export default function ArticleAssistant() {
         {/* Header */}
         <div className="mb-6 flex-shrink-0">
           <h1 className="text-4xl font-bold text-gray-900 mb-2">AI-Powered News Discovery Assistant</h1>
-          <p className="text-gray-600">Search the web with advanced operators, discover articles, and chat with your curated collection using DuckDuckGo</p>
+          <p className="text-gray-600">Search multiple regions with advanced operators, discover articles, and chat with your curated collection using DuckDuckGo</p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
           {/* Control Panel */}
           <div className="lg:col-span-1 flex flex-col min-h-0">
-            <Card className="mb-6 flex-shrink-0">
-              <CardHeader>
+            <Card className="flex-1 flex flex-col min-h-0">
+              <CardHeader className="flex-shrink-0">
                 <CardTitle className="flex items-center gap-2">
                   <Globe className="h-5 w-5" />
-                  Web Search & Crawl
+                  Article Discovery
                 </CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="flex-1 overflow-y-auto min-h-0">
                 <div className="space-y-4">
                   <div>
                     <label htmlFor="search-keywords" className="block text-sm font-medium text-gray-700 mb-2">
@@ -581,10 +601,82 @@ export default function ArticleAssistant() {
                             disabled={isCrawling}
                           />
                         </div>
+                        
+                                                 <div>
+                           <label className="block text-xs font-medium text-gray-700 mb-2">
+                             Search Regions
+                           </label>
+                           <div className="grid grid-cols-2 gap-2 border rounded p-2">
+                            {availableRegions.map((region) => (
+                              <label key={region.code} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-gray-50 p-1 rounded">
+                                <input
+                                  type="checkbox"
+                                  checked={advancedSearch.regions.includes(region.code)}
+                                  onChange={(e) => {
+                                    const newRegions = e.target.checked
+                                      ? [...advancedSearch.regions, region.code]
+                                      : advancedSearch.regions.filter(r => r !== region.code)
+                                    
+                                    // Prevent deselecting all regions
+                                    if (newRegions.length > 0) {
+                                      setAdvancedSearch(prev => ({...prev, regions: newRegions}))
+                                    }
+                                  }}
+                                  className="w-3 h-3"
+                                  disabled={isCrawling}
+                                />
+                                <span className="flex items-center gap-1">
+                                  <span>{region.flag}</span>
+                                  <span>{region.name}</span>
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                          <div className="flex items-center justify-between mt-2">
+                            <p className="text-xs text-gray-500">
+                              Selected: {advancedSearch.regions.length} region(s)
+                            </p>
+                            <div className="flex gap-1">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setAdvancedSearch(prev => ({...prev, regions: ["uk-en"]}))}
+                                className="text-xs px-2 py-1 h-6"
+                                disabled={isCrawling}
+                              >
+                                🇬🇧 UK Only
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setAdvancedSearch(prev => ({...prev, regions: ["uk-en", "us-en"]}))}
+                                className="text-xs px-2 py-1 h-6"
+                                disabled={isCrawling}
+                              >
+                                🇬🇧🇺🇸 UK+US
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setAdvancedSearch(prev => ({...prev, regions: ["uk-en", "us-en", "de-de", "fr-fr", "it-it", "es-es", "nl-nl"]}))}
+                                className="text-xs px-2 py-1 h-6"
+                                disabled={isCrawling}
+                              >
+                                🌍 EU+US
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                       
-                      <div className="text-xs text-gray-500 bg-gray-50 p-2 rounded">
-                        <strong>Preview:</strong> {buildSearchQuery() || "Enter search criteria above"}
+                      <div className="text-xs text-gray-500 bg-gray-50 p-2 rounded space-y-1">
+                        <div><strong>Query:</strong> {buildSearchQuery() || "Enter search criteria above"}</div>
+                        <div><strong>Regions:</strong> {advancedSearch.regions.map(code => 
+                          availableRegions.find(r => r.code === code)?.flag + " " + availableRegions.find(r => r.code === code)?.name
+                        ).join(", ")}</div>
                       </div>
                       
                       <Button
@@ -599,7 +691,8 @@ export default function ArticleAssistant() {
                           includeSite: "",
                           excludeSite: "",
                           inTitle: "",
-                          inUrl: ""
+                          inUrl: "",
+                          regions: ["uk-en"]
                         })}
                         className="w-full text-xs"
                         disabled={isCrawling}
@@ -609,31 +702,32 @@ export default function ArticleAssistant() {
                     </div>
                   )}
                   <Button onClick={handleCrawl} disabled={isCrawling || !buildSearchQuery().trim()} className="w-full">
-                    {isCrawling ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Searching & Crawling...
-                      </>
-                    ) : (
+                  {isCrawling ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Discovering Articles...
+                    </>
+                                      ) : (
                       <>
                         <Play className="mr-2 h-4 w-4" />
-                        Search & Crawl Articles
+                        Discover Articles
                       </>
                     )}
-                  </Button>
+                </Button>
                   {crawlStatus && <p className="text-sm text-gray-600 mt-2">{crawlStatus}</p>}
                 </div>
               </CardContent>
             </Card>
 
-            {/* Articles List */}
-            <Card className="flex-1 flex flex-col min-h-0">
+            {/* Articles List - Only show when advanced search is not expanded */}
+            {!showAdvancedSearch && (
+              <Card className="flex-1 flex flex-col min-h-0">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2 justify-between">
-                  <div className="flex items-center gap-2">
-                    <Calendar className="h-5 w-5" />
-                    Recent Articles ({Math.min(10, articles.length)} of {articles.length})
-                  </div>
+                  <CardTitle className="flex items-center gap-2 justify-between">
+                    <div className="flex items-center gap-2">
+                  <Calendar className="h-5 w-5" />
+                      Recent Articles ({Math.min(10, articles.length)} of {articles.length})
+                    </div>
                   {articles.length > 10 && (
                     <Button 
                       variant="outline" 
@@ -669,6 +763,11 @@ export default function ArticleAssistant() {
                             }
                           </Badge>
                           <span className="text-xs text-gray-500">{article.source}</span>
+                          {article.region && (
+                            <span className="text-xs text-gray-500 flex items-center gap-1">
+                              {getRegionInfo(article.region)?.flag} {getRegionInfo(article.region)?.name}
+                            </span>
+                          )}
                         </div>
                         {article.content_type === "link_only" ? (
                           <p className="text-xs text-gray-600 mb-2 italic">
@@ -692,6 +791,7 @@ export default function ArticleAssistant() {
                 )}
               </CardContent>
             </Card>
+            )}
           </div>
 
           {/* Chat Interface */}
