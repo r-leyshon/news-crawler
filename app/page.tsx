@@ -458,28 +458,28 @@ export default function ArticleAssistant() {
         <div className="mb-6 flex-shrink-0">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className={`text-3xl font-bold mb-1 tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
-                UK AI News
-              </h1>
+              <div className="flex items-center gap-2">
+                <h1 className={`text-3xl font-bold tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                  UK AI News
+                </h1>
+                <Button
+                  onClick={() => setIsInfoOpen(true)}
+                  variant="ghost"
+                  size="icon"
+                  className={`h-8 w-8 rounded-full ${
+                    isDarkMode 
+                      ? 'text-slate-400 hover:text-white hover:bg-slate-700' 
+                      : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200'
+                  }`}
+                >
+                  <Info className="h-4 w-4" />
+                </Button>
+              </div>
               <p className={`text-sm ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>
                 AI and machine learning news from the United Kingdom
               </p>
             </div>
             <div className="flex items-center gap-2">
-              {/* Info Button */}
-              <Button
-                onClick={() => setIsInfoOpen(true)}
-                variant="outline"
-                size="icon"
-                className={`${
-                  isDarkMode 
-                    ? 'bg-slate-800/50 border-slate-600 text-slate-200 hover:bg-slate-700 hover:text-white' 
-                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
-                }`}
-              >
-                <Info className="h-4 w-4" />
-              </Button>
-
               {/* Auth Button */}
               {status === "loading" ? (
                 <Button variant="outline" size="sm" disabled className={`${
