@@ -14,7 +14,7 @@ from datetime import datetime
 import uuid
 import logging
 import json
-from pyprojroot import here
+from pathlib import Path
 from dotenv import dotenv_values
 from ddgs import DDGS
 import asyncpg
@@ -24,8 +24,11 @@ from pgvector.asyncpg import register_vector
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Get the directory where this file lives (backend/)
+BACKEND_DIR = Path(__file__).parent
+
 # Load configuration
-with open(here("backend/config.json"), "r") as f:
+with open(BACKEND_DIR / "config.json", "r") as f:
     config = json.load(f)
 
 # Extract Azure OpenAI config
@@ -45,8 +48,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load environment variables
-env_vars = dotenv_values(here("backend/.env"))
+# Load environment variables from .env file (for local development)
+env_path = BACKEND_DIR / ".env"
+env_vars = dotenv_values(env_path) if env_path.exists() else {}
 
 # Get POSTGRES_URL from environment or .env
 POSTGRES_URL = os.environ.get("POSTGRES_URL") or env_vars.get("POSTGRES_URL")
