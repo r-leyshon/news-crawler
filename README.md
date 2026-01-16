@@ -16,41 +16,38 @@ An automated news aggregator that curates artificial intelligence and machine le
 
 ## 🏗️ Architecture
 
+### Automated Weekly Crawl (GitHub Actions)
+
 ```mermaid
-flowchart TB
-    subgraph "GitHub"
-        GHA[("GitHub Actions<br/>Weekly Cron")]
-        REPO[("Repository")]
-    end
+flowchart LR
+    GHA["⏰ GitHub Actions<br/>Weekly Cron"] --> DDGS["🔍 DuckDuckGo"]
+    DDGS --> SCRAPE["📄 Scrape Articles"]
+    SCRAPE --> AZURE["🤖 Azure OpenAI"]
+    AZURE --> |"Summarize<br/>Classify<br/>Embed"| NEON[("🗄️ Neon PostgreSQL<br/>+ pgvector")]
+```
 
-    subgraph "Vercel"
-        NEXT["Next.js Frontend"]
-        API["FastAPI Backend<br/>(Serverless)"]
-    end
+### User Interaction (Vercel App)
 
-    subgraph "External Services"
-        NEON[("Neon PostgreSQL<br/>+ pgvector")]
-        AZURE["Azure OpenAI<br/>GPT-4 + Embeddings"]
-        DDGS["DuckDuckGo<br/>Search API"]
-    end
+```mermaid
+flowchart LR
+    USER["👤 User"] --> NEXT["⚡ Next.js<br/>Frontend"]
+    NEXT --> API["🐍 FastAPI<br/>Backend"]
+    API --> NEON[("🗄️ Neon PostgreSQL")]
+    API --> AZURE["🤖 Azure OpenAI"]
+    AZURE --> |"RAG Response"| API
+    NEON --> |"Similar Articles"| API
+    API --> NEXT
+    NEXT --> USER
+```
 
-    subgraph "Users"
-        USER(("Browser"))
-        ADMIN(("Admin<br/>via GitHub OAuth"))
-    end
+### Admin Flow (GitHub OAuth)
 
-    GHA -->|"1. Trigger weekly"| REPO
-    GHA -->|"2. Run crawl script"| DDGS
-    GHA -->|"3. Summarize & embed"| AZURE
-    GHA -->|"4. Store articles"| NEON
-
-    USER -->|"View articles"| NEXT
-    NEXT -->|"Fetch data"| API
-    API -->|"Query vectors"| NEON
-    API -->|"Generate responses"| AZURE
-
-    ADMIN -->|"Delete articles"| NEXT
-    NEXT -->|"Auth callback"| REPO
+```mermaid
+flowchart LR
+    ADMIN["🔐 Admin"] --> |"Login"| GITHUB["GitHub OAuth"]
+    GITHUB --> |"Verify"| NEXT["⚡ Next.js"]
+    NEXT --> |"Delete"| API["🐍 FastAPI"]
+    API --> NEON[("🗄️ Neon PostgreSQL")]
 ```
 
 ## 🔄 Data Flow
