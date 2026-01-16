@@ -3,13 +3,13 @@
 import type React from "react"
 
 import { useState, useRef, useEffect } from "react"
+import { useSession, signIn, signOut } from "next-auth/react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, Play, MessageCircle, Globe, Calendar, ExternalLink, ChevronDown, ChevronUp, Settings, X, PanelRightOpen, PanelRightClose, Search, Filter, Trash2, Sun, Moon, TrendingUp, TrendingDown, Minus } from "lucide-react"
+import { Loader2, MessageCircle, Globe, Calendar, ExternalLink, X, PanelRightClose, Search, Filter, Trash2, Sun, Moon, TrendingUp, TrendingDown, Minus, Settings, LogIn, LogOut, Github } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
-import { availableRegions, getRegionInfo } from "@/lib/regions"
+import { getRegionInfo } from "@/lib/regions"
 
 interface Message {
   id: string
@@ -33,25 +33,11 @@ interface Article {
 }
 
 export default function ArticleAssistant() {
+  const { data: session, status } = useSession()
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
-  const [searchKeywords, setSearchKeywords] = useState("")
-  const [showAdvancedSearch, setShowAdvancedSearch] = useState(false)
-  const [advancedSearch, setAdvancedSearch] = useState({
-    requiredTerms: "",
-    excludedTerms: "",
-    exactPhrase: "",
-    fileType: "",
-    includeSite: "",
-    excludeSite: "",
-    inTitle: "",
-    inUrl: "",
-    regions: ["uk-en"] // Default to UK
-  })
   const [isLoading, setIsLoading] = useState(false)
-  const [isCrawling, setIsCrawling] = useState(false)
   const [articles, setArticles] = useState<Article[]>([])
-  const [crawlStatus, setCrawlStatus] = useState("")
   const [isChatOpen, setIsChatOpen] = useState(false)
   const [searchTerm, setSearchTerm] = useState("")
   const [filterType, setFilterType] = useState<"all" | "full" | "link_only">("all")
@@ -61,6 +47,9 @@ export default function ArticleAssistant() {
   const [isClassifying, setIsClassifying] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const { toast } = useToast()
+
+  // Check if user is the owner (can delete articles)
+  const isOwner = session?.user?.isOwner === true
 
   const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
@@ -119,60 +108,6 @@ export default function ArticleAssistant() {
       return true
     })
     .sort((a, b) => new Date(b.date_added).getTime() - new Date(a.date_added).getTime())
-
-  // Function to build search query with advanced operators
-  const buildSearchQuery = () => {
-    const parts = []
-    
-    // Basic keywords
-    if (searchKeywords.trim()) {
-      parts.push(searchKeywords.trim())
-    }
-    
-    // Required terms (+ operator)
-    if (advancedSearch.requiredTerms.trim()) {
-      const required = advancedSearch.requiredTerms.split(',').map(term => `+${term.trim()}`).join(' ')
-      parts.push(required)
-    }
-    
-    // Excluded terms (- operator) 
-    if (advancedSearch.excludedTerms.trim()) {
-      const excluded = advancedSearch.excludedTerms.split(',').map(term => `-${term.trim()}`).join(' ')
-      parts.push(excluded)
-    }
-    
-    // Exact phrase (quotes)
-    if (advancedSearch.exactPhrase.trim()) {
-      parts.push(`"${advancedSearch.exactPhrase.trim()}"`)
-    }
-    
-    // File type
-    if (advancedSearch.fileType.trim()) {
-      parts.push(`filetype:${advancedSearch.fileType.trim()}`)
-    }
-    
-    // Include site
-    if (advancedSearch.includeSite.trim()) {
-      parts.push(`site:${advancedSearch.includeSite.trim()}`)
-    }
-    
-    // Exclude site
-    if (advancedSearch.excludeSite.trim()) {
-      parts.push(`-site:${advancedSearch.excludeSite.trim()}`)
-    }
-    
-    // In title
-    if (advancedSearch.inTitle.trim()) {
-      parts.push(`intitle:${advancedSearch.inTitle.trim()}`)
-    }
-    
-    // In URL
-    if (advancedSearch.inUrl.trim()) {
-      parts.push(`inurl:${advancedSearch.inUrl.trim()}`)
-    }
-    
-    return parts.join(' ')
-  }
 
   // Function to render text with clickable links and basic markdown
   const renderTextWithLinks = (text: string, isUser: boolean = false) => {
@@ -406,74 +341,6 @@ export default function ArticleAssistant() {
     }
   }
 
-  const handleCrawl = async () => {
-    const searchQuery = buildSearchQuery()
-    
-    if (!searchQuery.trim()) {
-      toast({
-        title: "Search Keywords Required",
-        description: "Please enter search keywords or advanced search criteria before discovering articles.",
-        variant: "destructive",
-      })
-      return
-    }
-
-    setIsCrawling(true)
-    const selectedRegions = advancedSearch.regions
-    const regionNames = selectedRegions.map(code => 
-      availableRegions.find(r => r.code === code)?.name || code
-    ).join(", ")
-    
-    setCrawlStatus(`Starting search in ${regionNames} with: "${searchQuery}"`)
-
-    try {
-      // If multiple regions selected, we'll search each region separately
-      let totalArticlesAdded = 0
-      let totalArticlesFiltered = 0
-      const articlesPerRegion = Math.ceil(10 / selectedRegions.length)
-      
-      for (const region of selectedRegions) {
-        setCrawlStatus(`Searching ${availableRegions.find(r => r.code === region)?.name || region}...`)
-        
-      const response = await fetch(`${API_BASE}/crawl`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-            keywords: [searchQuery],
-            max_articles: articlesPerRegion,
-            region: region
-        }),
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-          totalArticlesAdded += data.articles_added
-          totalArticlesFiltered += (data.articles_filtered || 0)
-        }
-      }
-
-      // Update status with combined results
-      const filterMessage = totalArticlesFiltered > 0 ? ` (${totalArticlesFiltered} filtered for content)` : ""
-      setCrawlStatus(`Search completed! Found ${totalArticlesAdded} new articles from ${regionNames}${filterMessage}.`)
-      toast({
-        title: "Multi-Region Search Completed",
-        description: `Successfully found and added ${totalArticlesAdded} new articles from ${selectedRegions.length} region(s).${filterMessage}`,
-      })
-      fetchArticles()
-    } catch (error) {
-      setCrawlStatus("Article discovery failed. Please try again.")
-      toast({
-        title: "Article Discovery Failed",
-        description: "There was an error during the article discovery process.",
-        variant: "destructive",
-      })
-    } finally {
-      setIsCrawling(false)
-    }
-  }
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!input.trim() || isLoading) return
@@ -591,13 +458,50 @@ export default function ArticleAssistant() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className={`text-3xl font-bold mb-1 tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
-                News Discovery
+                UK AI News
               </h1>
               <p className={`text-sm ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>
-                Search, discover, and analyze articles with AI
+                AI and machine learning news from the United Kingdom
               </p>
             </div>
             <div className="flex items-center gap-2">
+              {/* Auth Button */}
+              {status === "loading" ? (
+                <Button variant="outline" size="sm" disabled className={`${
+                  isDarkMode ? 'bg-slate-800/50 border-slate-600' : 'bg-white border-slate-300'
+                }`}>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                </Button>
+              ) : session ? (
+                <Button
+                  onClick={() => signOut()}
+                  variant="outline"
+                  size="sm"
+                  className={`flex items-center gap-2 ${
+                    isDarkMode 
+                      ? 'bg-slate-800/50 border-slate-600 text-slate-200 hover:bg-slate-700 hover:text-white' 
+                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
+                  }`}
+                >
+                  <LogOut className="h-4 w-4" />
+                  <span className="hidden sm:inline">{session.user?.name || 'Logout'}</span>
+                </Button>
+              ) : (
+                <Button
+                  onClick={() => signIn("github")}
+                  variant="outline"
+                  size="sm"
+                  className={`flex items-center gap-2 ${
+                    isDarkMode 
+                      ? 'bg-slate-800/50 border-slate-600 text-slate-200 hover:bg-slate-700 hover:text-white' 
+                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
+                  }`}
+                >
+                  <Github className="h-4 w-4" />
+                  <span className="hidden sm:inline">Admin Login</span>
+                </Button>
+              )}
+
               {/* Theme Toggle */}
               <Button
                 onClick={() => setIsDarkMode(!isDarkMode)}
@@ -612,7 +516,7 @@ export default function ArticleAssistant() {
                 {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </Button>
               
-              {/* Chat Toggle - Now with vibrant color */}
+              {/* Chat Toggle */}
               <Button
                 onClick={() => setIsChatOpen(!isChatOpen)}
                 className={`flex items-center gap-2 ${
@@ -639,144 +543,6 @@ export default function ArticleAssistant() {
             </div>
           </div>
         </div>
-
-        {/* Search Controls */}
-        <Card className={`mb-6 flex-shrink-0 ${
-          isDarkMode 
-            ? 'bg-slate-800/50 border-slate-700' 
-            : 'bg-white border-slate-200 shadow-sm'
-        }`}>
-          <CardContent className="pt-4">
-            <div className="flex flex-col gap-4">
-              <div className="flex gap-3">
-                <div className="flex-1">
-                  <Input
-                    value={searchKeywords}
-                    onChange={(e) => setSearchKeywords(e.target.value)}
-                    placeholder="Search keywords (e.g., artificial intelligence, machine learning)"
-                    disabled={isCrawling}
-                    className={`${
-                      isDarkMode 
-                        ? 'bg-slate-900/50 border-slate-600 text-white placeholder:text-slate-500' 
-                        : 'bg-slate-50 border-slate-300 text-slate-900 placeholder:text-slate-400'
-                    }`}
-                  />
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={() => setShowAdvancedSearch(!showAdvancedSearch)}
-                  className={`${isDarkMode ? 'text-slate-400 hover:text-white hover:bg-slate-700' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'}`}
-                >
-                  <Settings className="h-4 w-4 mr-2" />
-                  Advanced
-                  {showAdvancedSearch ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />}
-                </Button>
-                <Button 
-                  onClick={handleCrawl} 
-                  disabled={isCrawling || !buildSearchQuery().trim()} 
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                >
-                  {isCrawling ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Searching...
-                    </>
-                  ) : (
-                    <>
-                      <Play className="mr-2 h-4 w-4" />
-                      Discover
-                    </>
-                  )}
-                </Button>
-              </div>
-              
-              {/* Advanced Search Fields */}
-              {showAdvancedSearch && (
-                <div className={`grid grid-cols-2 md:grid-cols-4 gap-3 pt-3 border-t ${isDarkMode ? 'border-slate-700' : 'border-slate-200'}`}>
-                  <div>
-                    <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Must Include</label>
-                    <Input
-                      value={advancedSearch.requiredTerms}
-                      onChange={(e) => setAdvancedSearch(prev => ({...prev, requiredTerms: e.target.value}))}
-                      placeholder="AI, justice"
-                      className={`text-xs ${isDarkMode ? 'bg-slate-900/50 border-slate-600 text-white placeholder:text-slate-500' : 'bg-slate-50 border-slate-300 text-slate-900 placeholder:text-slate-400'}`}
-                      disabled={isCrawling}
-                    />
-                  </div>
-                  <div>
-                    <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Exclude</label>
-                    <Input
-                      value={advancedSearch.excludedTerms}
-                      onChange={(e) => setAdvancedSearch(prev => ({...prev, excludedTerms: e.target.value}))}
-                      placeholder="sports, ads"
-                      className={`text-xs ${isDarkMode ? 'bg-slate-900/50 border-slate-600 text-white placeholder:text-slate-500' : 'bg-slate-50 border-slate-300 text-slate-900 placeholder:text-slate-400'}`}
-                      disabled={isCrawling}
-                    />
-                  </div>
-                  <div>
-                    <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Exact Phrase</label>
-                    <Input
-                      value={advancedSearch.exactPhrase}
-                      onChange={(e) => setAdvancedSearch(prev => ({...prev, exactPhrase: e.target.value}))}
-                      placeholder="machine learning"
-                      className={`text-xs ${isDarkMode ? 'bg-slate-900/50 border-slate-600 text-white placeholder:text-slate-500' : 'bg-slate-50 border-slate-300 text-slate-900 placeholder:text-slate-400'}`}
-                      disabled={isCrawling}
-                    />
-                  </div>
-                  <div>
-                    <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Site Filter</label>
-                    <Input
-                      value={advancedSearch.includeSite}
-                      onChange={(e) => setAdvancedSearch(prev => ({...prev, includeSite: e.target.value}))}
-                      placeholder="gov.uk"
-                      className={`text-xs ${isDarkMode ? 'bg-slate-900/50 border-slate-600 text-white placeholder:text-slate-500' : 'bg-slate-50 border-slate-300 text-slate-900 placeholder:text-slate-400'}`}
-                      disabled={isCrawling}
-                    />
-                  </div>
-                  <div className="col-span-2 md:col-span-4">
-                    <label className={`block text-xs font-medium mb-2 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Search Regions</label>
-                    <div className="flex flex-wrap gap-2">
-                      {availableRegions.map((region) => (
-                        <label 
-                          key={region.code} 
-                          className={`flex items-center gap-1.5 text-xs cursor-pointer px-2 py-1 rounded border transition-colors ${
-                            advancedSearch.regions.includes(region.code)
-                              ? 'bg-emerald-600/20 border-emerald-500 text-emerald-600 dark:text-emerald-300'
-                              : isDarkMode 
-                                ? 'bg-slate-900/50 border-slate-600 text-slate-400 hover:border-slate-500'
-                                : 'bg-slate-50 border-slate-300 text-slate-600 hover:border-slate-400'
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={advancedSearch.regions.includes(region.code)}
-                            onChange={(e) => {
-                              const newRegions = e.target.checked
-                                ? [...advancedSearch.regions, region.code]
-                                : advancedSearch.regions.filter(r => r !== region.code)
-                              if (newRegions.length > 0) {
-                                setAdvancedSearch(prev => ({...prev, regions: newRegions}))
-                              }
-                            }}
-                            className="sr-only"
-                            disabled={isCrawling}
-                          />
-                          <span>{region.flag}</span>
-                          <span>{region.name}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-              
-              {crawlStatus && (
-                <p className="text-sm text-emerald-500">{crawlStatus}</p>
-              )}
-            </div>
-          </CardContent>
-        </Card>
 
         {/* Sentiment Filter Pills */}
         <div className="flex items-center gap-3 mb-4 flex-shrink-0">
@@ -836,8 +602,8 @@ export default function ArticleAssistant() {
               Negative ({sentimentCounts.negative})
             </button>
             
-            {/* Classify unclassified articles button */}
-            {unclassifiedCount > 0 && (
+            {/* Classify unclassified articles button - owner only */}
+            {isOwner && unclassifiedCount > 0 && (
               <button
                 onClick={handleClassifySentiment}
                 disabled={isClassifying}
@@ -931,7 +697,7 @@ export default function ArticleAssistant() {
               <p className={`max-w-md ${isDarkMode ? 'text-slate-500' : 'text-slate-500'}`}>
                 {searchTerm || filterType !== "all" || regionFilter !== "all" || sentimentFilter !== "all"
                   ? "Try adjusting your filters to see more results." 
-                  : "Enter search keywords above and click 'Discover' to find and save articles."
+                  : "Articles are updated weekly via automated crawling."
                 }
               </p>
             </div>
@@ -1008,18 +774,20 @@ export default function ArticleAssistant() {
                       >
                         <ExternalLink className="h-4 w-4" />
                       </a>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleDeleteArticle(article.id)}
-                        className={`opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0 ${
-                          isDarkMode 
-                            ? 'text-slate-500 hover:text-red-400 hover:bg-red-500/10' 
-                            : 'text-slate-400 hover:text-red-500 hover:bg-red-50'
-                        }`}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
+                      {isOwner && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDeleteArticle(article.id)}
+                          className={`opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0 ${
+                            isDarkMode 
+                              ? 'text-slate-500 hover:text-red-400 hover:bg-red-500/10' 
+                              : 'text-slate-400 hover:text-red-500 hover:bg-red-50'
+                          }`}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
                     </div>
                   </div>
                 )
