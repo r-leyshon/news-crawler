@@ -1,0 +1,11 @@
+# Ignore conda/virtual environments
+backend-env/
+*-env/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Ignore local development files
+.env
+*.log

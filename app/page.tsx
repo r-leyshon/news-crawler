@@ -52,8 +52,8 @@ export default function ArticleAssistant() {
   // Check if user is the owner (can delete articles)
   const isOwner = session?.user?.isOwner === true
 
-  // In production (Vercel), use relative URLs. Locally, fallback to localhost:8000
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' && window.location.hostname !== 'localhost' ? '' : 'http://localhost:8000')
+  // In production, use the separate backend deployment. Locally, fallback to localhost:8000
+  const API_BASE = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' && window.location.hostname !== 'localhost' ? 'https://news-crawler-backend-r-leyshons-projects.vercel.app' : 'http://localhost:8000')
 
   // Initialize theme from localStorage
   useEffect(() => {
