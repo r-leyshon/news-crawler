@@ -2,14 +2,13 @@
 Vercel serverless function entry point for FastAPI backend.
 """
 import sys
-from pathlib import Path
+import os
 
-# Add backend directory to path
-backend_path = Path(__file__).parent.parent / "backend"
-sys.path.insert(0, str(backend_path))
+# Add backend directory to path so we can import main
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend"))
 
-# Import the FastAPI app
-from main import app
+# Import the FastAPI app and Mangum handler from backend
+from main import app, handler
 
-# Vercel expects the app to be named 'app' or 'handler'
-handler = app
+# Export both for Vercel's ASGI/Lambda support
