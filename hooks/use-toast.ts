@@ -12,8 +12,8 @@ interface Toast extends ToastProps {
   onOpenChange?: (open: boolean) => void
 }
 
-const TOAST_LIMIT = 1
-const TOAST_REMOVE_DELAY = 1000000
+const TOAST_LIMIT = 3
+const TOAST_REMOVE_DELAY = 5000  // 5 seconds
 
 let count = 0
 

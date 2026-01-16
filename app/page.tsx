@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, Play, MessageCircle, Globe, Calendar, ExternalLink, ChevronDown, ChevronUp, Settings, X, PanelRightOpen, PanelRightClose, Search, Filter, Trash2, Sun, Moon } from "lucide-react"
+import { Loader2, Play, MessageCircle, Globe, Calendar, ExternalLink, ChevronDown, ChevronUp, Settings, X, PanelRightOpen, PanelRightClose, Search, Filter, Trash2, Sun, Moon, TrendingUp, TrendingDown, Minus } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { availableRegions, getRegionInfo } from "@/lib/regions"
 
@@ -29,6 +29,7 @@ interface Article {
   source: string
   content_type?: string
   region?: string
+  sentiment?: string  // "positive", "neutral", "negative"
 }
 
 export default function ArticleAssistant() {
@@ -55,7 +56,9 @@ export default function ArticleAssistant() {
   const [searchTerm, setSearchTerm] = useState("")
   const [filterType, setFilterType] = useState<"all" | "full" | "link_only">("all")
   const [regionFilter, setRegionFilter] = useState<"all" | string>("all")
+  const [sentimentFilter, setSentimentFilter] = useState<"all" | "positive" | "neutral" | "negative">("all")
   const [isDarkMode, setIsDarkMode] = useState(true)
+  const [isClassifying, setIsClassifying] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const { toast } = useToast()
 
@@ -78,6 +81,14 @@ export default function ArticleAssistant() {
   // Get unique regions from articles for filter dropdown
   const uniqueRegions = Array.from(new Set(articles.map(article => article.region).filter((region): region is string => Boolean(region))))
 
+  // Calculate sentiment counts
+  const unclassifiedCount = articles.filter(a => !a.sentiment).length
+  const sentimentCounts = {
+    positive: articles.filter(a => a.sentiment === "positive").length,
+    neutral: articles.filter(a => a.sentiment === "neutral").length,
+    negative: articles.filter(a => a.sentiment === "negative").length,
+  }
+
   // Filter and sort articles by date
   const filteredArticles = articles
     .filter(article => {
@@ -88,6 +99,13 @@ export default function ArticleAssistant() {
       // Filter by region
       if (regionFilter !== "all" && article.region !== regionFilter) {
         return false
+      }
+      // Filter by sentiment
+      if (sentimentFilter !== "all") {
+        const articleSentiment = article.sentiment || "neutral"
+        if (articleSentiment !== sentimentFilter) {
+          return false
+        }
       }
       // Search by title, source, or summary
       if (searchTerm) {
@@ -305,6 +323,18 @@ export default function ArticleAssistant() {
     }
   }
 
+  // Get sentiment icon and color
+  const getSentimentDisplay = (sentiment?: string) => {
+    switch (sentiment) {
+      case "positive":
+        return { icon: TrendingUp, color: "text-green-500", bgColor: "bg-green-500/10", borderColor: "border-green-500/30" }
+      case "negative":
+        return { icon: TrendingDown, color: "text-red-500", bgColor: "bg-red-500/10", borderColor: "border-red-500/30" }
+      default:
+        return { icon: Minus, color: "text-slate-400", bgColor: "bg-slate-500/10", borderColor: "border-slate-500/30" }
+    }
+  }
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages])
@@ -344,6 +374,35 @@ export default function ArticleAssistant() {
         description: "Failed to delete the article. Please try again.",
         variant: "destructive",
       })
+    }
+  }
+
+  const handleClassifySentiment = async () => {
+    setIsClassifying(true)
+    try {
+      const response = await fetch(`${API_BASE}/articles/classify-sentiment`, {
+        method: "POST"
+      })
+      if (response.ok) {
+        const data = await response.json()
+        toast({
+          title: "Sentiment Classification Complete",
+          description: `Classified ${data.classified} articles. ${data.already_classified} were already classified.`,
+        })
+        // Refresh articles to get updated sentiment
+        fetchArticles()
+      } else {
+        throw new Error("Classification failed")
+      }
+    } catch (error) {
+      console.error("Failed to classify sentiment:", error)
+      toast({
+        title: "Classification Failed",
+        description: "Failed to classify article sentiment. Please try again.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsClassifying(false)
     }
   }
 
@@ -553,14 +612,13 @@ export default function ArticleAssistant() {
                 {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </Button>
               
-              {/* Chat Toggle */}
+              {/* Chat Toggle - Now with vibrant color */}
               <Button
                 onClick={() => setIsChatOpen(!isChatOpen)}
-                variant="outline"
                 className={`flex items-center gap-2 ${
-                  isDarkMode 
-                    ? 'bg-slate-800/50 border-slate-600 text-slate-200 hover:bg-slate-700 hover:text-white' 
-                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
+                  isChatOpen 
+                    ? 'bg-violet-600 hover:bg-violet-700 text-white' 
+                    : 'bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 text-white shadow-lg shadow-violet-500/25'
                 }`}
               >
                 {isChatOpen ? (
@@ -570,10 +628,10 @@ export default function ArticleAssistant() {
                   </>
                 ) : (
                   <>
-                    <PanelRightOpen className="h-4 w-4" />
+                    <MessageCircle className="h-4 w-4" />
                     Open Chat
                     {messages.length > 0 && (
-                      <Badge className="ml-1 bg-emerald-500 text-white text-xs">{messages.length}</Badge>
+                      <Badge className="ml-1 bg-white/20 text-white text-xs">{messages.length}</Badge>
                     )}
                   </>
                 )}
@@ -720,6 +778,91 @@ export default function ArticleAssistant() {
           </CardContent>
         </Card>
 
+        {/* Sentiment Filter Pills */}
+        <div className="flex items-center gap-3 mb-4 flex-shrink-0">
+          <span className={`text-sm font-medium ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Sentiment:</span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setSentimentFilter("all")}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+                sentimentFilter === "all"
+                  ? isDarkMode 
+                    ? 'bg-slate-600 text-white' 
+                    : 'bg-slate-800 text-white'
+                  : isDarkMode
+                    ? 'bg-slate-800/50 text-slate-400 hover:bg-slate-700'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              All ({articles.length})
+            </button>
+            <button
+              onClick={() => setSentimentFilter("positive")}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all flex items-center gap-1.5 ${
+                sentimentFilter === "positive"
+                  ? 'bg-green-600 text-white'
+                  : isDarkMode
+                    ? 'bg-green-500/10 text-green-400 border border-green-500/30 hover:bg-green-500/20'
+                    : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100'
+              }`}
+            >
+              <TrendingUp className="h-3 w-3" />
+              Positive ({sentimentCounts.positive})
+            </button>
+            <button
+              onClick={() => setSentimentFilter("neutral")}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all flex items-center gap-1.5 ${
+                sentimentFilter === "neutral"
+                  ? isDarkMode ? 'bg-slate-500 text-white' : 'bg-slate-600 text-white'
+                  : isDarkMode
+                    ? 'bg-slate-500/10 text-slate-400 border border-slate-500/30 hover:bg-slate-500/20'
+                    : 'bg-slate-100 text-slate-600 border border-slate-200 hover:bg-slate-200'
+              }`}
+            >
+              <Minus className="h-3 w-3" />
+              Neutral ({sentimentCounts.neutral})
+            </button>
+            <button
+              onClick={() => setSentimentFilter("negative")}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all flex items-center gap-1.5 ${
+                sentimentFilter === "negative"
+                  ? 'bg-red-600 text-white'
+                  : isDarkMode
+                    ? 'bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20'
+                    : 'bg-red-50 text-red-700 border border-red-200 hover:bg-red-100'
+              }`}
+            >
+              <TrendingDown className="h-3 w-3" />
+              Negative ({sentimentCounts.negative})
+            </button>
+            
+            {/* Classify unclassified articles button */}
+            {unclassifiedCount > 0 && (
+              <button
+                onClick={handleClassifySentiment}
+                disabled={isClassifying}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all flex items-center gap-1.5 ml-2 ${
+                  isClassifying
+                    ? 'bg-violet-600/50 text-violet-200 cursor-wait'
+                    : 'bg-violet-600 text-white hover:bg-violet-700'
+                }`}
+              >
+                {isClassifying ? (
+                  <>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Classifying...
+                  </>
+                ) : (
+                  <>
+                    <Settings className="h-3 w-3" />
+                    Classify {unclassifiedCount} unclassified
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Filter Bar */}
         <div className="flex items-center gap-4 mb-4 flex-shrink-0">
           <div className="flex-1 relative">
@@ -783,10 +926,10 @@ export default function ArticleAssistant() {
             <div className="flex flex-col items-center justify-center h-full text-center">
               <Globe className={`h-16 w-16 mb-4 ${isDarkMode ? 'text-slate-600' : 'text-slate-300'}`} />
               <h3 className={`text-xl font-medium mb-2 ${isDarkMode ? 'text-slate-300' : 'text-slate-700'}`}>
-                {searchTerm || filterType !== "all" || regionFilter !== "all" ? "No matching articles" : "No articles yet"}
+                {searchTerm || filterType !== "all" || regionFilter !== "all" || sentimentFilter !== "all" ? "No matching articles" : "No articles yet"}
               </h3>
               <p className={`max-w-md ${isDarkMode ? 'text-slate-500' : 'text-slate-500'}`}>
-                {searchTerm || filterType !== "all" || regionFilter !== "all"
+                {searchTerm || filterType !== "all" || regionFilter !== "all" || sentimentFilter !== "all"
                   ? "Try adjusting your filters to see more results." 
                   : "Enter search keywords above and click 'Discover' to find and save articles."
                 }
@@ -794,83 +937,93 @@ export default function ArticleAssistant() {
             </div>
           ) : (
             <div className="space-y-2 pb-4">
-              {filteredArticles.map((article) => (
-                <div 
-                  key={article.id} 
-                  className={`flex items-start gap-4 p-4 rounded-lg border transition-colors group ${
-                    isDarkMode 
-                      ? 'bg-slate-800/30 border-slate-700 hover:border-slate-600 hover:bg-slate-800/50' 
-                      : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50 shadow-sm'
-                  }`}
-                >
-                  {/* Date Column */}
-                  <div className={`flex-shrink-0 w-24 text-xs ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                    <div className="flex items-center gap-1">
-                      <Calendar className="h-3 w-3" />
-                      {formatDate(article.date_added)}
-                    </div>
-                  </div>
-                  
-                  {/* Content */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-start gap-2 mb-1">
-                      <Badge 
-                        variant="outline"
-                        className={`text-xs flex-shrink-0 ${
-                          article.content_type === "link_only" 
-                            ? 'border-amber-500/50 text-amber-500' 
-                            : 'border-emerald-500/50 text-emerald-500'
-                        }`}
-                      >
-                        {article.content_type === "link_only" ? "Link" : "Full"}
-                      </Badge>
-                      <h3 className={`text-sm font-medium leading-snug ${isDarkMode ? 'text-slate-200' : 'text-slate-800'}`}>
-                        {article.title}
-                      </h3>
+              {filteredArticles.map((article) => {
+                const sentimentDisplay = getSentimentDisplay(article.sentiment)
+                const SentimentIcon = sentimentDisplay.icon
+                
+                return (
+                  <div 
+                    key={article.id} 
+                    className={`flex items-start gap-4 p-4 rounded-lg border transition-colors group ${
+                      isDarkMode 
+                        ? 'bg-slate-800/30 border-slate-700 hover:border-slate-600 hover:bg-slate-800/50' 
+                        : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50 shadow-sm'
+                    }`}
+                  >
+                    {/* Sentiment Indicator */}
+                    <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${sentimentDisplay.bgColor} ${sentimentDisplay.borderColor} border`}>
+                      <SentimentIcon className={`h-4 w-4 ${sentimentDisplay.color}`} />
                     </div>
                     
-                    <div className={`flex items-center gap-2 text-xs mb-2 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                      <span>{article.source}</span>
-                      {article.region && (
-                        <>
-                          <span>•</span>
-                          <span>{getRegionInfo(article.region)?.flag} {getRegionInfo(article.region)?.name}</span>
-                        </>
+                    {/* Date Column */}
+                    <div className={`flex-shrink-0 w-24 text-xs ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                      <div className="flex items-center gap-1">
+                        <Calendar className="h-3 w-3" />
+                        {formatDate(article.date_added)}
+                      </div>
+                    </div>
+                    
+                    {/* Content */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-start gap-2 mb-1">
+                        <Badge 
+                          variant="outline"
+                          className={`text-xs flex-shrink-0 ${
+                            article.content_type === "link_only" 
+                              ? 'border-amber-500/50 text-amber-500' 
+                              : 'border-emerald-500/50 text-emerald-500'
+                          }`}
+                        >
+                          {article.content_type === "link_only" ? "Link" : "Full"}
+                        </Badge>
+                        <h3 className={`text-sm font-medium leading-snug ${isDarkMode ? 'text-slate-200' : 'text-slate-800'}`}>
+                          {article.title}
+                        </h3>
+                      </div>
+                      
+                      <div className={`flex items-center gap-2 text-xs mb-2 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                        <span>{article.source}</span>
+                        {article.region && (
+                          <>
+                            <span>•</span>
+                            <span>{getRegionInfo(article.region)?.flag} {getRegionInfo(article.region)?.name}</span>
+                          </>
+                        )}
+                      </div>
+                      
+                      {article.content_type !== "link_only" && article.summary && (
+                        <p className={`text-xs line-clamp-2 ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                          {article.summary}
+                        </p>
                       )}
                     </div>
                     
-                    {article.content_type !== "link_only" && article.summary && (
-                      <p className={`text-xs line-clamp-2 ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                        {article.summary}
-                      </p>
-                    )}
+                    {/* Actions */}
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <a
+                        href={article.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-emerald-500 hover:text-emerald-400 p-1"
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                      </a>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleDeleteArticle(article.id)}
+                        className={`opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0 ${
+                          isDarkMode 
+                            ? 'text-slate-500 hover:text-red-400 hover:bg-red-500/10' 
+                            : 'text-slate-400 hover:text-red-500 hover:bg-red-50'
+                        }`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                   </div>
-                  
-                  {/* Actions */}
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    <a
-                      href={article.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-emerald-500 hover:text-emerald-400 p-1"
-                    >
-                      <ExternalLink className="h-4 w-4" />
-                    </a>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleDeleteArticle(article.id)}
-                      className={`opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0 ${
-                        isDarkMode 
-                          ? 'text-slate-500 hover:text-red-400 hover:bg-red-500/10' 
-                          : 'text-slate-400 hover:text-red-500 hover:bg-red-50'
-                      }`}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>
@@ -884,7 +1037,7 @@ export default function ArticleAssistant() {
       }`}>
         <div className={`p-4 border-b flex items-center justify-between flex-shrink-0 ${isDarkMode ? 'border-slate-700' : 'border-slate-200'}`}>
           <div className="flex items-center gap-2">
-            <MessageCircle className="h-5 w-5 text-emerald-500" />
+            <MessageCircle className="h-5 w-5 text-violet-500" />
             <h2 className={`font-semibold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>Chat with Articles</h2>
           </div>
           <Button
@@ -916,7 +1069,7 @@ export default function ArticleAssistant() {
                 <div
                   className={`max-w-[85%] p-3 rounded-lg text-sm ${
                     message.role === "user" 
-                      ? "bg-emerald-600 text-white" 
+                      ? "bg-violet-600 text-white" 
                       : isDarkMode 
                         ? "bg-slate-700 text-slate-200" 
                         : "bg-white text-slate-800 border border-slate-200"
@@ -931,7 +1084,7 @@ export default function ArticleAssistant() {
                   )}
                   <p className={`text-xs mt-1 ${
                     message.role === "user" 
-                      ? "text-emerald-200" 
+                      ? "text-violet-200" 
                       : isDarkMode ? "text-slate-500" : "text-slate-400"
                   }`}>
                     {message.timestamp.toLocaleTimeString()}
@@ -974,7 +1127,7 @@ export default function ArticleAssistant() {
             <Button 
               type="submit" 
               disabled={isLoading || !input.trim()}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white"
+              className="bg-violet-600 hover:bg-violet-700 text-white"
             >
               {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Send"}
             </Button>

@@ -91,6 +91,7 @@ class Article(BaseModel):
     source: str
     content_type: Optional[str] = None
     region: Optional[str] = None
+    sentiment: Optional[str] = None  # "positive", "neutral", "negative"
 
 # Helper Functions
 
@@ -160,6 +161,71 @@ Content to analyze:
         logger.error(f"Content filtering error: {e}")
         # Default to safe if filtering fails to avoid blocking legitimate content
         return {"is_safe": True, "reason": f"Filter error: {str(e)}"}
+
+async def classify_sentiment(content: str, title: str = "") -> str:
+    """
+    Classify article sentiment as positive, neutral, or negative.
+    Returns: "positive", "neutral", or "negative"
+    """
+    try:
+        # Prepare content for analysis (truncate if too long)
+        analysis_text = content[:2000] + ("..." if len(content) > 2000 else "")
+        if title:
+            analysis_text = f"Title: {title}\n\nContent: {analysis_text}"
+        
+        # Define the response schema for structured output
+        SENTIMENT_SCHEMA = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "sentiment_classification",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "sentiment": {
+                            "type": "string",
+                            "enum": ["positive", "neutral", "negative"],
+                            "description": "The overall sentiment of the article"
+                        }
+                    },
+                    "required": ["sentiment"],
+                    "additionalProperties": False
+                }
+            }
+        }
+        
+        prompt = f"""Analyze the sentiment of this news article. Classify it as:
+- "positive": Good news, achievements, breakthroughs, solutions, optimistic outlook
+- "neutral": Factual reporting, balanced coverage, informational content
+- "negative": Bad news, problems, failures, warnings, pessimistic outlook
+
+Article:
+{analysis_text}"""
+        
+        response = await asyncio.wait_for(
+            openai_client.chat.completions.create(
+                model=CHAT_DEPLOYMENT_NAME,
+                messages=[
+                    {"role": "system", "content": "You are a sentiment analysis assistant. Classify news articles by their overall tone and sentiment."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=SENTIMENT_SCHEMA,
+                max_tokens=50,
+                temperature=0.1
+            ),
+            timeout=15.0
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        result = json.loads(result_text)
+        
+        return result.get("sentiment", "neutral")
+        
+    except Exception as e:
+        logger.error(f"Sentiment classification error: {e}")
+        # Default to neutral if classification fails
+        return "neutral"
+
 async def get_embedding(text: str) -> List[float]:
     """Generate embedding using Azure OpenAI"""
     try:
@@ -380,6 +446,13 @@ async def crawl_articles(request: CrawlRequest):
                             logger.error(f"Summary generation error for {url}: {e}")
                             summary = article_data['content'][:500] + "..."
                         
+                        # Classify sentiment
+                        try:
+                            sentiment = await classify_sentiment(article_data['content'], article_data['title'])
+                        except Exception as e:
+                            logger.error(f"Sentiment classification error for {url}: {e}")
+                            sentiment = "neutral"
+                        
                         # Generate embedding
                         try:
                             embedding = await get_embedding(summary)
@@ -402,7 +475,8 @@ async def crawl_articles(request: CrawlRequest):
                                     "public": bool(article_data['public']),
                                     "source": article_data['source'] or "Unknown",
                                     "content_type": "full",
-                                    "region": request.region
+                                    "region": request.region,
+                                    "sentiment": sentiment
                                 }]
                             )
                             
@@ -432,6 +506,13 @@ async def crawl_articles(request: CrawlRequest):
                         # Use search result body as summary if available, otherwise use title
                         summary = search_body if search_body else f"External article: {search_title}"
                         
+                        # Classify sentiment for link-only articles
+                        try:
+                            sentiment = await classify_sentiment(search_content_to_check, search_title)
+                        except Exception as e:
+                            logger.error(f"Sentiment classification error for search result {url}: {e}")
+                            sentiment = "neutral"
+                        
                         # Generate embedding for search result data
                         try:
                             embedding = await get_embedding(summary)
@@ -454,7 +535,8 @@ async def crawl_articles(request: CrawlRequest):
                                     "public": True,  # Default to public for link-only articles
                                     "source": urlparse(url).netloc,
                                     "content_type": "link_only",
-                                    "region": request.region
+                                    "region": request.region,
+                                    "sentiment": sentiment
                                 }]
                             )
                             
@@ -661,7 +743,8 @@ async def get_articles():
                 public=metadata['public'],
                 source=metadata['source'],
                 content_type=metadata.get('content_type', 'full'),
-                region=metadata.get('region')
+                region=metadata.get('region'),
+                sentiment=metadata.get('sentiment')
             ))
         
         # Sort by date_added (newest first)
@@ -682,6 +765,69 @@ async def delete_article(article_id: str):
     except Exception as e:
         logger.error(f"Error deleting article: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete article")
+
+@app.post("/articles/classify-sentiment")
+async def classify_unclassified_articles():
+    """Classify sentiment for all articles that don't have sentiment yet"""
+    try:
+        results = collection.get()
+        
+        classified_count = 0
+        already_classified = 0
+        errors = 0
+        
+        for i, (doc_id, metadata, document) in enumerate(zip(results['ids'], results['metadatas'], results['documents'])):
+            # Check if already has sentiment
+            if metadata.get('sentiment'):
+                already_classified += 1
+                continue
+            
+            # Get content for classification
+            title = metadata.get('title', '')
+            content = document or title  # Use document (summary) or title
+            
+            try:
+                # Classify sentiment
+                sentiment = await classify_sentiment(content, title)
+                
+                # Update the article metadata
+                # ChromaDB requires updating by deleting and re-adding
+                embedding = results['embeddings'][i] if results.get('embeddings') else None
+                
+                # Get the embedding if not included
+                if embedding is None:
+                    embedding = await get_embedding(document)
+                
+                # Update metadata with sentiment
+                new_metadata = {**metadata, "sentiment": sentiment}
+                
+                # Delete and re-add with new metadata
+                collection.delete(ids=[doc_id])
+                collection.add(
+                    ids=[doc_id],
+                    embeddings=[embedding],
+                    documents=[document],
+                    metadatas=[new_metadata]
+                )
+                
+                classified_count += 1
+                logger.info(f"Classified article '{title[:50]}...' as {sentiment}")
+                
+            except Exception as e:
+                logger.error(f"Error classifying article {doc_id}: {e}")
+                errors += 1
+                continue
+        
+        return {
+            "message": "Sentiment classification completed",
+            "classified": classified_count,
+            "already_classified": already_classified,
+            "errors": errors
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in sentiment classification: {e}")
+        raise HTTPException(status_code=500, detail="Failed to classify articles")
 
 @app.get("/health")
 async def health_check():
