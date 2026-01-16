@@ -7,7 +7,7 @@ import { useSession, signIn, signOut } from "next-auth/react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, MessageCircle, Globe, Calendar, ExternalLink, X, PanelRightClose, Search, Filter, Trash2, Sun, Moon, TrendingUp, TrendingDown, Minus, Settings, LogIn, LogOut, Github } from "lucide-react"
+import { Loader2, MessageCircle, Globe, Calendar, ExternalLink, X, PanelRightClose, Search, Filter, Trash2, Sun, Moon, TrendingUp, TrendingDown, Minus, Settings, LogIn, LogOut, Github, Info } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { getRegionInfo } from "@/lib/regions"
 
@@ -45,6 +45,7 @@ export default function ArticleAssistant() {
   const [sentimentFilter, setSentimentFilter] = useState<"all" | "positive" | "neutral" | "negative">("all")
   const [isDarkMode, setIsDarkMode] = useState(true)
   const [isClassifying, setIsClassifying] = useState(false)
+  const [isInfoOpen, setIsInfoOpen] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const { toast } = useToast()
 
@@ -465,6 +466,20 @@ export default function ArticleAssistant() {
               </p>
             </div>
             <div className="flex items-center gap-2">
+              {/* Info Button */}
+              <Button
+                onClick={() => setIsInfoOpen(true)}
+                variant="outline"
+                size="icon"
+                className={`${
+                  isDarkMode 
+                    ? 'bg-slate-800/50 border-slate-600 text-slate-200 hover:bg-slate-700 hover:text-white' 
+                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <Info className="h-4 w-4" />
+              </Button>
+
               {/* Auth Button */}
               {status === "loading" ? (
                 <Button variant="outline" size="sm" disabled className={`${
@@ -902,6 +917,94 @@ export default function ArticleAssistant() {
           </div>
         </form>
       </div>
+
+      {/* Info Modal */}
+      {isInfoOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          {/* Backdrop */}
+          <div 
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => setIsInfoOpen(false)}
+          />
+          
+          {/* Modal Content */}
+          <div className={`relative w-full max-w-2xl mx-4 rounded-2xl shadow-2xl overflow-hidden ${
+            isDarkMode 
+              ? 'bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700' 
+              : 'bg-white border border-slate-200'
+          }`}>
+            {/* Header */}
+            <div className={`flex items-center justify-between p-6 border-b ${
+              isDarkMode ? 'border-slate-700' : 'border-slate-200'
+            }`}>
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-xl bg-gradient-to-br from-violet-500 to-purple-600">
+                  <Globe className="h-5 w-5 text-white" />
+                </div>
+                <h2 className={`text-xl font-bold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                  About UK AI News
+                </h2>
+              </div>
+              <Button
+                onClick={() => setIsInfoOpen(false)}
+                variant="ghost"
+                size="icon"
+                className={isDarkMode ? 'text-slate-400 hover:text-white hover:bg-slate-700' : 'text-slate-500 hover:text-slate-900'}
+              >
+                <X className="h-5 w-5" />
+              </Button>
+            </div>
+            
+            {/* Body */}
+            <div className={`p-6 space-y-4 max-h-[60vh] overflow-y-auto ${
+              isDarkMode ? 'text-slate-300' : 'text-slate-600'
+            }`}>
+              <p className="leading-relaxed">
+                <strong className={isDarkMode ? 'text-white' : 'text-slate-900'}>UK AI News</strong> is an automated news aggregator that collects and curates articles about artificial intelligence, machine learning, and related technologies with a focus on the United Kingdom.
+              </p>
+              
+              <div className={`p-4 rounded-xl ${isDarkMode ? 'bg-slate-800/50' : 'bg-slate-50'}`}>
+                <h3 className={`font-semibold mb-2 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                  🔍 How It Works
+                </h3>
+                <ul className="space-y-2 text-sm">
+                  <li>• Articles are automatically discovered weekly using targeted search queries</li>
+                  <li>• Each article is summarized using AI to extract key insights</li>
+                  <li>• Sentiment analysis classifies articles as positive, neutral, or negative</li>
+                  <li>• Vector embeddings enable semantic search through the AI chat assistant</li>
+                </ul>
+              </div>
+              
+              <div className={`p-4 rounded-xl ${isDarkMode ? 'bg-slate-800/50' : 'bg-slate-50'}`}>
+                <h3 className={`font-semibold mb-2 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                  💬 Chat Assistant
+                </h3>
+                <p className="text-sm">
+                  Use the chat feature to ask questions about the collected articles. The AI assistant uses retrieval-augmented generation (RAG) to find relevant articles and provide informed answers based on the content.
+                </p>
+              </div>
+              
+              <div className={`p-4 rounded-xl ${isDarkMode ? 'bg-slate-800/50' : 'bg-slate-50'}`}>
+                <h3 className={`font-semibold mb-2 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                  🛠️ Technology Stack
+                </h3>
+                <div className="flex flex-wrap gap-2 text-sm">
+                  <span className={`px-2 py-1 rounded-md ${isDarkMode ? 'bg-slate-700 text-slate-300' : 'bg-slate-200 text-slate-700'}`}>Next.js</span>
+                  <span className={`px-2 py-1 rounded-md ${isDarkMode ? 'bg-slate-700 text-slate-300' : 'bg-slate-200 text-slate-700'}`}>FastAPI</span>
+                  <span className={`px-2 py-1 rounded-md ${isDarkMode ? 'bg-slate-700 text-slate-300' : 'bg-slate-200 text-slate-700'}`}>PostgreSQL</span>
+                  <span className={`px-2 py-1 rounded-md ${isDarkMode ? 'bg-slate-700 text-slate-300' : 'bg-slate-200 text-slate-700'}`}>pgvector</span>
+                  <span className={`px-2 py-1 rounded-md ${isDarkMode ? 'bg-slate-700 text-slate-300' : 'bg-slate-200 text-slate-700'}`}>Azure OpenAI</span>
+                  <span className={`px-2 py-1 rounded-md ${isDarkMode ? 'bg-slate-700 text-slate-300' : 'bg-slate-200 text-slate-700'}`}>Vercel</span>
+                </div>
+              </div>
+              
+              <p className={`text-sm ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                Built by <a href="https://github.com/r-leyshon" target="_blank" rel="noopener noreferrer" className="text-violet-500 hover:underline">@r-leyshon</a> • Articles are updated weekly via automated workflows.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

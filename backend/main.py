@@ -3,14 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
-import chromadb
-from chromadb.config import Settings
 from openai import AsyncAzureOpenAI
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
 import urllib.robotparser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 import os
 from datetime import datetime
 import uuid
@@ -19,7 +17,8 @@ import json
 from pyprojroot import here
 from dotenv import dotenv_values
 from ddgs import DDGS
-
+import asyncpg
+from pgvector.asyncpg import register_vector
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -40,7 +39,7 @@ app = FastAPI(title="AI Article Assistant API")
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,22 +48,48 @@ app.add_middleware(
 # Load environment variables
 env_vars = dotenv_values(here("backend/.env"))
 
+# Get POSTGRES_URL from environment or .env
+POSTGRES_URL = os.environ.get("POSTGRES_URL") or env_vars.get("POSTGRES_URL")
+
 # Initialize Azure OpenAI client
 openai_client = AsyncAzureOpenAI(
-    api_key=env_vars.get("AZURE_OPENAI_KEY"),
+    api_key=os.environ.get("AZURE_OPENAI_KEY") or env_vars.get("AZURE_OPENAI_KEY"),
     api_version=API_VERSION,
-    azure_endpoint=env_vars.get("AZURE_OPENAI_ENDPOINT")
+    azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT") or env_vars.get("AZURE_OPENAI_ENDPOINT")
 )
 
 # Initialize DDGS client
 ddgs_client = DDGS()
 
-# ChromaDB Configuration
-chroma_client = chromadb.PersistentClient(path=here("backend/chroma_db"))
-collection = chroma_client.get_or_create_collection(
-    name="articles",
-    metadata={"hnsw:space": "cosine"}
-)
+# Database connection pool
+db_pool: Optional[asyncpg.Pool] = None
+
+async def init_db():
+    """Initialize database connection pool"""
+    global db_pool
+    if db_pool is None and POSTGRES_URL:
+        db_pool = await asyncpg.create_pool(
+            POSTGRES_URL,
+            min_size=1,
+            max_size=10,
+            init=register_vector
+        )
+        logger.info("Database connection pool initialized")
+
+async def get_db():
+    """Get database connection from pool"""
+    if db_pool is None:
+        await init_db()
+    return db_pool
+
+@app.on_event("startup")
+async def startup():
+    await init_db()
+
+@app.on_event("shutdown")
+async def shutdown():
+    if db_pool:
+        await db_pool.close()
 
 # Pydantic Models
 class CrawlRequest(BaseModel):
@@ -91,7 +116,7 @@ class Article(BaseModel):
     source: str
     content_type: Optional[str] = None
     region: Optional[str] = None
-    sentiment: Optional[str] = None  # "positive", "neutral", "negative"
+    sentiment: Optional[str] = None
 
 class ArticleStatistics(BaseModel):
     """Statistics about the article collection"""
@@ -102,8 +127,8 @@ class ArticleStatistics(BaseModel):
     unclassified_count: int
     full_articles_count: int
     link_only_count: int
-    regions: dict  # region code -> count
-    sources: dict  # source domain -> count
+    regions: dict
+    sources: dict
 
 # Tool definitions for function calling
 ARTICLE_STATS_TOOL = {
@@ -119,72 +144,92 @@ ARTICLE_STATS_TOOL = {
     }
 }
 
-def get_article_statistics() -> ArticleStatistics:
+async def get_article_statistics() -> ArticleStatistics:
     """Get current statistics about the article collection"""
     try:
-        results = collection.get()
-        
-        if not results['ids']:
+        pool = await get_db()
+        async with pool.acquire() as conn:
+            # Get total count
+            total = await conn.fetchval("SELECT COUNT(*) FROM articles")
+            
+            if total == 0:
+                return ArticleStatistics(
+                    total_articles=0,
+                    positive_count=0,
+                    neutral_count=0,
+                    negative_count=0,
+                    unclassified_count=0,
+                    full_articles_count=0,
+                    link_only_count=0,
+                    regions={},
+                    sources={}
+                )
+            
+            # Get sentiment counts
+            sentiment_counts = await conn.fetch("""
+                SELECT sentiment, COUNT(*) as count 
+                FROM articles 
+                GROUP BY sentiment
+            """)
+            
+            positive = 0
+            neutral = 0
+            negative = 0
+            unclassified = 0
+            for row in sentiment_counts:
+                if row['sentiment'] == 'positive':
+                    positive = row['count']
+                elif row['sentiment'] == 'neutral':
+                    neutral = row['count']
+                elif row['sentiment'] == 'negative':
+                    negative = row['count']
+                else:
+                    unclassified = row['count']
+            
+            # Get content type counts
+            content_counts = await conn.fetch("""
+                SELECT content_type, COUNT(*) as count 
+                FROM articles 
+                GROUP BY content_type
+            """)
+            
+            full_articles = 0
+            link_only = 0
+            for row in content_counts:
+                if row['content_type'] == 'link_only':
+                    link_only = row['count']
+                else:
+                    full_articles = row['count']
+            
+            # Get region counts
+            region_rows = await conn.fetch("""
+                SELECT region, COUNT(*) as count 
+                FROM articles 
+                WHERE region IS NOT NULL 
+                GROUP BY region
+            """)
+            regions = {row['region']: row['count'] for row in region_rows}
+            
+            # Get source counts
+            source_rows = await conn.fetch("""
+                SELECT source, COUNT(*) as count 
+                FROM articles 
+                WHERE source IS NOT NULL 
+                GROUP BY source
+            """)
+            sources = {row['source']: row['count'] for row in source_rows}
+            
             return ArticleStatistics(
-                total_articles=0,
-                positive_count=0,
-                neutral_count=0,
-                negative_count=0,
-                unclassified_count=0,
-                full_articles_count=0,
-                link_only_count=0,
-                regions={},
-                sources={}
+                total_articles=total,
+                positive_count=positive,
+                neutral_count=neutral,
+                negative_count=negative,
+                unclassified_count=unclassified,
+                full_articles_count=full_articles,
+                link_only_count=link_only,
+                regions=regions,
+                sources=sources
             )
-        
-        total = len(results['ids'])
-        positive = 0
-        neutral = 0
-        negative = 0
-        unclassified = 0
-        full_articles = 0
-        link_only = 0
-        regions = {}
-        sources = {}
-        
-        for metadata in results['metadatas']:
-            # Sentiment counts
-            sentiment = metadata.get('sentiment')
-            if sentiment == 'positive':
-                positive += 1
-            elif sentiment == 'neutral':
-                neutral += 1
-            elif sentiment == 'negative':
-                negative += 1
-            else:
-                unclassified += 1
-            
-            # Content type counts
-            content_type = metadata.get('content_type', 'full')
-            if content_type == 'link_only':
-                link_only += 1
-            else:
-                full_articles += 1
-            
-            # Region counts
-            region = metadata.get('region', 'unknown')
-            regions[region] = regions.get(region, 0) + 1
-            
-            # Source counts
-            source = metadata.get('source', 'unknown')
-            sources[source] = sources.get(source, 0) + 1
-        
-        return ArticleStatistics(
-            total_articles=total,
-            positive_count=positive,
-            neutral_count=neutral,
-            negative_count=negative,
-            unclassified_count=unclassified,
-            full_articles_count=full_articles,
-            link_only_count=link_only,
-            regions=regions,
-            sources=sources
-        )
     except Exception as e:
         logger.error(f"Error getting article statistics: {e}")
         return ArticleStatistics(
@@ -202,17 +247,12 @@ def get_article_statistics() -> ArticleStatistics:
 # Helper Functions
 
 async def filter_inappropriate_content(content: str, title: str = "") -> dict:
-    """
-    Use OpenAI to analyze content for inappropriate material
-    Returns: {"is_safe": bool, "reason": str}
-    """
+    """Use OpenAI to analyze content for inappropriate material"""
     try:
-        # Prepare content for analysis (truncate if too long)
         analysis_text = content[:3000] + ("..." if len(content) > 3000 else "")
         if title:
             analysis_text = f"Title: {title}\n\nContent: {analysis_text}"
         
-        # Define the response schema for structured output
         CONTENT_FILTER_SCHEMA = {
             "type": "json_schema",
             "json_schema": {
@@ -230,7 +270,6 @@ async def filter_inappropriate_content(content: str, title: str = "") -> dict:
             }
         }
         
-        # Use OpenAI to analyze content appropriateness
         prompt = f"""Analyze the following content for appropriateness in a professional work environment. 
 
 Consider the content inappropriate if it contains:
@@ -259,27 +298,19 @@ Content to analyze:
         )
         
         result_text = response.choices[0].message.content.strip()
-        result = json.loads(result_text)
-        
-        return result
+        return json.loads(result_text)
         
     except Exception as e:
         logger.error(f"Content filtering error: {e}")
-        # Default to safe if filtering fails to avoid blocking legitimate content
         return {"is_safe": True, "reason": f"Filter error: {str(e)}"}
 
 async def classify_sentiment(content: str, title: str = "") -> str:
-    """
-    Classify article sentiment as positive, neutral, or negative.
-    Returns: "positive", "neutral", or "negative"
-    """
+    """Classify article sentiment as positive, neutral, or negative."""
     try:
-        # Prepare content for analysis (truncate if too long)
         analysis_text = content[:2000] + ("..." if len(content) > 2000 else "")
         if title:
             analysis_text = f"Title: {title}\n\nContent: {analysis_text}"
         
-        # Define the response schema for structured output
         SENTIMENT_SCHEMA = {
             "type": "json_schema",
             "json_schema": {
@@ -324,12 +355,10 @@ Article:
         
         result_text = response.choices[0].message.content.strip()
         result = json.loads(result_text)
-        
         return result.get("sentiment", "neutral")
         
     except Exception as e:
         logger.error(f"Sentiment classification error: {e}")
-        # Default to neutral if classification fails
         return "neutral"
 
 async def get_embedding(text: str) -> List[float]:
@@ -340,7 +369,7 @@ async def get_embedding(text: str) -> List[float]:
                 model=EMBEDDING_DEPLOYMENT_NAME,
                 input=text
             ),
-            timeout=30.0  # 30 second timeout
+            timeout=30.0
         )
         return response.data[0].embedding
     except asyncio.TimeoutError:
@@ -353,18 +382,17 @@ async def get_embedding(text: str) -> List[float]:
 async def generate_summary(text: str) -> str:
     """Generate summary using Azure OpenAI"""
     try:
-        # Add timeout and better error handling
         response = await asyncio.wait_for(
             openai_client.chat.completions.create(
                 model=CHAT_DEPLOYMENT_NAME,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that creates concise summaries of articles. Summarize the following article in 3-5 sentences, focusing on the main points and key insights."},
-                    {"role": "user", "content": f"Article text: {text[:4000]}"}  # Limit text length
+                    {"role": "user", "content": f"Article text: {text[:4000]}"}
                 ],
                 max_tokens=200,
                 temperature=0.3
             ),
-            timeout=30.0  # 30 second timeout
+            timeout=30.0
         )
         return response.choices[0].message.content.strip()
     except asyncio.TimeoutError:
@@ -386,7 +414,7 @@ def can_fetch(url: str) -> bool:
         
         return rp.can_fetch("*", url)
     except:
-        return True  # If robots.txt can't be checked, assume it's okay
+        return True
 
 async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[dict]:
     """Scrape article content from URL"""
@@ -402,16 +430,12 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[d
             html = await response.text()
             soup = BeautifulSoup(html, 'html.parser')
             
-            # Extract title
             title_tag = soup.find('title')
             title = title_tag.get_text().strip() if title_tag else "No title"
             
-            # Extract main content (simple approach)
-            # Remove script and style elements
             for script in soup(["script", "style"]):
                 script.decompose()
                 
-            # Try to find main content areas
             content_selectors = [
                 'article', 'main', '.content', '.post-content', 
                 '.entry-content', '.article-body', 'div[role="main"]'
@@ -425,14 +449,11 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[d
                     break
             
             if not content:
-                # Fallback to body text
                 body = soup.find('body')
                 content = body.get_text() if body else ""
             
-            # Clean up content
             content = ' '.join(content.split())
             
-            # Check if content seems to be behind paywall
             paywall_indicators = [
                 "subscribe to read", "premium content", "sign up to continue",
                 "login to view", "paywall", "subscription required"
@@ -440,7 +461,6 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[d
             
             is_public = not any(indicator in content.lower() for indicator in paywall_indicators)
             
-            # Extract publication date (basic attempt)
             date_published = None
             date_selectors = ['time[datetime]', '.date', '.published', 'meta[property="article:published_time"]']
             for selector in date_selectors:
@@ -451,7 +471,7 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[d
             
             return {
                 'title': title,
-                'content': content[:5000],  # Limit content length
+                'content': content[:5000],
                 'url': url,
                 'date_published': date_published,
                 'public': is_public,
@@ -465,22 +485,18 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[d
 async def search_web(keywords: List[str], max_results: int = 10, region: str = "uk-en") -> List[dict]:
     """Search web using DuckDuckGo"""
     try:
-        # Construct search query
         query = " ".join(keywords)
         
-        # Perform search using ddgs
-        # Use asyncio.to_thread to run the synchronous ddgs.text() in an async context
         results = await asyncio.to_thread(
             ddgs_client.text,
             query,
             region=region,
             safesearch="moderate",
-            timelimit="m",  # Recent results from last month
+            timelimit="m",
             max_results=max_results,
             backend="auto"
         )
         
-        # Extract search result data including titles
         search_results = []
         for result in results:
             if 'href' in result:
@@ -497,12 +513,74 @@ async def search_web(keywords: List[str], max_results: int = 10, region: str = "
         logger.error(f"Error in DuckDuckGo search: {e}")
         return []
 
+async def article_exists(url: str) -> bool:
+    """Check if an article with this URL already exists"""
+    try:
+        pool = await get_db()
+        async with pool.acquire() as conn:
+            result = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM articles WHERE url = $1)",
+                url
+            )
+            return result
+    except Exception as e:
+        logger.error(f"Error checking if article exists: {e}")
+        return False
+
+async def store_article(
+    title: str,
+    url: str,
+    summary: str,
+    embedding: List[float],
+    date_published: Optional[str],
+    is_public: bool,
+    source: str,
+    content_type: str,
+    region: str,
+    sentiment: str
+) -> str:
+    """Store an article in the database"""
+    try:
+        pool = await get_db()
+        async with pool.acquire() as conn:
+            article_id = await conn.fetchval(
+                """
+                INSERT INTO articles (title, url, summary, embedding, date_published, is_public, source, content_type, region, sentiment)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                RETURNING id
+                """,
+                title, url, summary, embedding, date_published, is_public, source, content_type, region, sentiment
+            )
+            return str(article_id)
+    except Exception as e:
+        logger.error(f"Error storing article: {e}")
+        raise
+
+async def search_similar_articles(query_embedding: List[float], limit: int = 5) -> List[dict]:
+    """Search for similar articles using vector similarity"""
+    try:
+        pool = await get_db()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, title, url, summary, date_published, date_added, is_public, source, content_type, region, sentiment,
+                       1 - (embedding <=> $1) as similarity
+                FROM articles
+                ORDER BY embedding <=> $1
+                LIMIT $2
+                """,
+                query_embedding, limit
+            )
+            return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"Error searching similar articles: {e}")
+        return []
+
 # API Endpoints
 @app.post("/crawl")
 async def crawl_articles(request: CrawlRequest):
     """Crawl web for articles based on keywords"""
     try:
-        # Search for articles
         search_results = await search_web(request.keywords, request.max_articles, request.region)
         
         articles_added = 0
@@ -513,21 +591,18 @@ async def crawl_articles(request: CrawlRequest):
                 url = search_result['url']
                 search_title = search_result['title']
                 search_body = search_result['body']
+                
                 try:
                     # Check if article already exists
-                    try:
-                        existing = collection.get(where={"url": url})
-                        if existing['ids']:
-                            logger.info(f"Article already exists, skipping: {url}")
-                            continue
-                    except Exception as e:
-                        logger.warning(f"Error checking existing article for {url}: {e}")
+                    if await article_exists(url):
+                        logger.info(f"Article already exists, skipping: {url}")
+                        continue
                     
                     # Try to scrape article content
                     article_data = await scrape_article(session, url)
                     
                     if article_data:
-                        # Full article scraped successfully - now filter for inappropriate content
+                        # Full article scraped successfully
                         try:
                             filter_result = await filter_inappropriate_content(
                                 article_data['content'], 
@@ -537,119 +612,94 @@ async def crawl_articles(request: CrawlRequest):
                             if not filter_result['is_safe']:
                                 logger.warning(f"Content filtered out: {url} - {filter_result['reason']}")
                                 articles_filtered += 1
-                                continue  # Skip this article entirely
-                            
+                                continue
                         except Exception as e:
                             logger.error(f"Content filtering error for {url}: {e}")
-                            # Continue with article if filter fails to avoid blocking legitimate content
                         
                         try:
                             summary = await generate_summary(article_data['content'])
                             if not summary or summary.startswith("Summary generation"):
-                                logger.warning(f"Summary generation failed for {url}, using truncated content")
                                 summary = article_data['content'][:500] + "..."
                         except Exception as e:
                             logger.error(f"Summary generation error for {url}: {e}")
                             summary = article_data['content'][:500] + "..."
                         
-                        # Classify sentiment
                         try:
                             sentiment = await classify_sentiment(article_data['content'], article_data['title'])
                         except Exception as e:
                             logger.error(f"Sentiment classification error for {url}: {e}")
                             sentiment = "neutral"
                         
-                        # Generate embedding
                         try:
                             embedding = await get_embedding(summary)
                         except Exception as e:
                             logger.error(f"Embedding generation failed for {url}: {e}")
                             continue
                         
-                        # Store full article with content
                         try:
-                            article_id = str(uuid.uuid4())
-                            collection.add(
-                                ids=[article_id],
-                                embeddings=[embedding],
-                                documents=[summary],
-                                metadatas=[{
-                                    "title": article_data['title'] or "Untitled",
-                                    "url": article_data['url'],
-                                    "date_published": article_data['date_published'] or "",
-                                    "date_added": datetime.now().isoformat(),
-                                    "public": bool(article_data['public']),
-                                    "source": article_data['source'] or "Unknown",
-                                    "content_type": "full",
-                                    "region": request.region,
-                                    "sentiment": sentiment
-                                }]
+                            await store_article(
+                                title=article_data['title'] or "Untitled",
+                                url=article_data['url'],
+                                summary=summary,
+                                embedding=embedding,
+                                date_published=article_data['date_published'],
+                                is_public=bool(article_data['public']),
+                                source=article_data['source'] or "Unknown",
+                                content_type="full",
+                                region=request.region,
+                                sentiment=sentiment
                             )
-                            
                             articles_added += 1
                             logger.info(f"Added full article: {article_data['title']}")
                         except Exception as e:
-                            logger.error(f"ChromaDB storage failed for {url}: {e}")
+                            logger.error(f"Database storage failed for {url}: {e}")
                             continue
                     else:
-                        # Scraping failed, store minimal article with search result data
-                        logger.info(f"Scraping failed for {url}, storing as link-only article: {search_title}")
+                        # Scraping failed, store link-only article
+                        logger.info(f"Scraping failed for {url}, storing as link-only: {search_title}")
                         
-                        # Filter search result content for appropriateness
-                        search_content_to_check = f"{search_title}\n{search_body}" if search_body else search_title
+                        search_content = f"{search_title}\n{search_body}" if search_body else search_title
+                        
                         try:
-                            filter_result = await filter_inappropriate_content(search_content_to_check, search_title)
-                            
+                            filter_result = await filter_inappropriate_content(search_content, search_title)
                             if not filter_result['is_safe']:
                                 logger.warning(f"Search result filtered out: {url} - {filter_result['reason']}")
                                 articles_filtered += 1
-                                continue  # Skip this search result entirely
-                                
+                                continue
                         except Exception as e:
                             logger.error(f"Content filtering error for search result {url}: {e}")
-                            # Continue with search result if filter fails
                         
-                        # Use search result body as summary if available, otherwise use title
                         summary = search_body if search_body else f"External article: {search_title}"
                         
-                        # Classify sentiment for link-only articles
                         try:
-                            sentiment = await classify_sentiment(search_content_to_check, search_title)
+                            sentiment = await classify_sentiment(search_content, search_title)
                         except Exception as e:
                             logger.error(f"Sentiment classification error for search result {url}: {e}")
                             sentiment = "neutral"
                         
-                        # Generate embedding for search result data
                         try:
                             embedding = await get_embedding(summary)
                         except Exception as e:
                             logger.error(f"Embedding generation failed for search result {url}: {e}")
                             continue
                         
-                        # Store link-only article
                         try:
-                            article_id = str(uuid.uuid4())
-                            collection.add(
-                                ids=[article_id],
-                                embeddings=[embedding],
-                                documents=[summary],
-                                metadatas=[{
-                                    "title": search_title,
-                                    "url": url,
-                                    "date_published": "",
-                                    "date_added": datetime.now().isoformat(),
-                                    "public": True,  # Default to public for link-only articles
-                                    "source": urlparse(url).netloc,
-                                    "content_type": "link_only",
-                                    "region": request.region,
-                                    "sentiment": sentiment
-                                }]
+                            await store_article(
+                                title=search_title,
+                                url=url,
+                                summary=summary,
+                                embedding=embedding,
+                                date_published=None,
+                                is_public=True,
+                                source=urlparse(url).netloc,
+                                content_type="link_only",
+                                region=request.region,
+                                sentiment=sentiment
                             )
-                            
                             articles_added += 1
                             logger.info(f"Added link-only article: {search_title}")
                         except Exception as e:
-                            logger.error(f"ChromaDB storage failed for link-only article {url}: {e}")
+                            logger.error(f"Database storage failed for link-only article {url}: {e}")
                             continue
                     
                 except Exception as e:
@@ -670,54 +720,36 @@ async def crawl_articles(request: CrawlRequest):
 async def ask_question(request: QuestionRequest):
     """Answer question using RAG"""
     try:
-        # Generate embedding for question
         question_embedding = await get_embedding(request.question)
+        results = await search_similar_articles(question_embedding, limit=5)
         
-        # Search for relevant articles
-        results = collection.query(
-            query_embeddings=[question_embedding],
-            n_results=5
-        )
-        
-        if not results['documents'] or not results['documents'][0]:
+        if not results:
             return {"answer": "I don't have any relevant articles to answer your question. Please run a crawl first to gather some articles."}
         
-        # Prepare context from retrieved articles
         context_parts = []
-        for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
-            # Handle both full articles and link-only articles
-            content_type = metadata.get('content_type', 'full')
+        for i, row in enumerate(results):
+            content_type = row.get('content_type', 'full')
             if content_type == 'link_only':
-                article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nType: External link only\nSource: {metadata.get('url', 'Unknown')}\n"
+                article_info = f"Article {i+1}: {row['title']}\nType: External link only\nSource: {row['url']}\n"
             else:
-                article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nSummary: {doc}\nSource: {metadata.get('url', 'Unknown')}\n"
+                article_info = f"Article {i+1}: {row['title']}\nSummary: {row['summary']}\nSource: {row['url']}\n"
             context_parts.append(article_info)
         
         context = "\n".join(context_parts)
         
-        # Build conversation messages with context
         conversation_messages = [
             {
                 "role": "system", 
-                "content": f"You are an AI assistant that answers questions based on a collection of articles. Some articles have full summaries, while others are external links with titles only. Use only the information provided to answer questions. For external link articles, acknowledge that you only have the title and suggest the user click the link to read more. Always be helpful and cite which articles you're referencing.\n\nAvailable Articles:\n{context}"
+                "content": f"You are an AI assistant that answers questions based on a collection of articles. Use only the information provided to answer questions. Always be helpful and cite which articles you're referencing.\n\nAvailable Articles:\n{context}"
             }
         ]
         
-        # Add conversation history if provided
         if request.messages:
             for msg in request.messages:
-                conversation_messages.append({
-                    "role": msg.role,
-                    "content": msg.content
-                })
+                conversation_messages.append({"role": msg.role, "content": msg.content})
         
-        # Add the current question
-        conversation_messages.append({
-            "role": "user", 
-            "content": request.question
-        })
+        conversation_messages.append({"role": "user", "content": request.question})
         
-        # Generate answer using Azure OpenAI
         response = await asyncio.wait_for(
             openai_client.chat.completions.create(
                 model=CHAT_DEPLOYMENT_NAME,
@@ -728,9 +760,7 @@ async def ask_question(request: QuestionRequest):
             timeout=30.0
         )
         
-        answer = response.choices[0].message.content.strip()
-        
-        return {"answer": answer}
+        return {"answer": response.choices[0].message.content.strip()}
         
     except asyncio.TimeoutError:
         logger.error("Question answering timed out")
@@ -745,35 +775,26 @@ async def ask_question_stream(request: QuestionRequest):
     
     async def generate_stream():
         try:
-            # Generate embedding for question
             question_embedding = await get_embedding(request.question)
+            results = await search_similar_articles(question_embedding, limit=5)
             
-            # Search for relevant articles
-            results = collection.query(
-                query_embeddings=[question_embedding],
-                n_results=5
-            )
-            
-            if not results['documents'] or not results['documents'][0]:
+            if not results:
                 no_articles_msg = "I don't have any relevant articles to answer your question. Please run a crawl first to gather some articles."
                 yield f"data: {json.dumps({'content': no_articles_msg, 'done': True})}\n\n"
                 return
             
-            # Prepare context from retrieved articles
             context_parts = []
-            for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
-                # Handle both full articles and link-only articles
-                content_type = metadata.get('content_type', 'full')
-                sentiment = metadata.get('sentiment', 'unclassified')
+            for i, row in enumerate(results):
+                content_type = row.get('content_type', 'full')
+                sentiment = row.get('sentiment', 'unclassified')
                 if content_type == 'link_only':
-                    article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nType: External link only\nSentiment: {sentiment}\nSource: {metadata.get('url', 'Unknown')}\n"
+                    article_info = f"Article {i+1}: {row['title']}\nType: External link only\nSentiment: {sentiment}\nSource: {row['url']}\n"
                 else:
-                    article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nSentiment: {sentiment}\nSummary: {doc}\nSource: {metadata.get('url', 'Unknown')}\n"
+                    article_info = f"Article {i+1}: {row['title']}\nSentiment: {sentiment}\nSummary: {row['summary']}\nSource: {row['url']}\n"
                 context_parts.append(article_info)
             
             context = "\n".join(context_parts)
             
-            # Build conversation messages with context
             system_prompt = f"""You are an AI assistant that answers questions based on a collection of articles. 
 
 You have access to a tool called 'get_article_statistics' that provides accurate counts of articles by sentiment, content type, region, and source. ALWAYS use this tool when the user asks about:
@@ -782,30 +803,18 @@ You have access to a tool called 'get_article_statistics' that provides accurate
 - Statistics or numbers about the collection
 - Breakdown by region or source
 
-Some articles have full summaries, while others are external links with titles only. Use only the information provided to answer questions. For external link articles, acknowledge that you only have the title and suggest the user click the link to read more. Always be helpful and cite which articles you're referencing.
-
 Available Articles (sample for content questions):
 {context}"""
 
-            conversation_messages = [
-                {"role": "system", "content": system_prompt}
-            ]
+            conversation_messages = [{"role": "system", "content": system_prompt}]
             
-            # Add conversation history if provided
             if request.messages:
                 for msg in request.messages:
-                    conversation_messages.append({
-                        "role": msg.role,
-                        "content": msg.content
-                    })
+                    conversation_messages.append({"role": msg.role, "content": msg.content})
             
-            # Add the current question
-            conversation_messages.append({
-                "role": "user", 
-                "content": request.question
-            })
+            conversation_messages.append({"role": "user", "content": request.question})
             
-            # First, make a non-streaming call to check for tool use
+            # Check for tool use
             initial_response = await asyncio.wait_for(
                 openai_client.chat.completions.create(
                     model=CHAT_DEPLOYMENT_NAME,
@@ -820,14 +829,11 @@ Available Articles (sample for content questions):
             
             response_message = initial_response.choices[0].message
             
-            # Check if the model wants to use a tool
             if response_message.tool_calls:
-                # Process tool calls
                 tool_results = []
                 for tool_call in response_message.tool_calls:
                     if tool_call.function.name == "get_article_statistics":
-                        # Execute the tool
-                        stats = get_article_statistics()
+                        stats = await get_article_statistics()
                         tool_result = {
                             "total_articles": stats.total_articles,
                             "sentiment_breakdown": {
@@ -849,7 +855,6 @@ Available Articles (sample for content questions):
                             "content": json.dumps(tool_result)
                         })
                 
-                # Add the assistant message with tool calls
                 conversation_messages.append({
                     "role": "assistant",
                     "tool_calls": [
@@ -864,11 +869,9 @@ Available Articles (sample for content questions):
                     ]
                 })
                 
-                # Add tool results
                 for tr in tool_results:
                     conversation_messages.append(tr)
                 
-                # Now stream the final response with tool results
                 stream = await asyncio.wait_for(
                     openai_client.chat.completions.create(
                         model=CHAT_DEPLOYMENT_NAME,
@@ -885,12 +888,9 @@ Available Articles (sample for content questions):
                         content = chunk.choices[0].delta.content
                         yield f"data: {json.dumps({'content': content, 'done': False})}\n\n"
             else:
-                # No tool call, just stream the response content
                 if response_message.content:
-                    # Since we already have the full response, send it
                     yield f"data: {json.dumps({'content': response_message.content, 'done': False})}\n\n"
             
-            # Send completion signal
             yield f"data: {json.dumps({'content': '', 'done': True})}\n\n"
             
         except asyncio.TimeoutError:
@@ -914,28 +914,33 @@ Available Articles (sample for content questions):
 async def get_articles():
     """Get all stored articles"""
     try:
-        results = collection.get()
-        
-        articles = []
-        for i, (doc_id, metadata) in enumerate(zip(results['ids'], results['metadatas'])):
-            articles.append(Article(
-                id=doc_id,
-                title=metadata['title'],
-                url=metadata['url'],
-                summary=results['documents'][i],
-                date_published=metadata.get('date_published'),
-                date_added=metadata['date_added'],
-                public=metadata['public'],
-                source=metadata['source'],
-                content_type=metadata.get('content_type', 'full'),
-                region=metadata.get('region'),
-                sentiment=metadata.get('sentiment')
-            ))
-        
-        # Sort by date_added (newest first)
-        articles.sort(key=lambda x: x.date_added, reverse=True)
-        
-        return articles
+        pool = await get_db()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, title, url, summary, date_published, date_added, is_public, source, content_type, region, sentiment
+                FROM articles
+                ORDER BY date_added DESC
+                """
+            )
+            
+            articles = []
+            for row in rows:
+                articles.append(Article(
+                    id=str(row['id']),
+                    title=row['title'],
+                    url=row['url'],
+                    summary=row['summary'],
+                    date_published=row['date_published'],
+                    date_added=row['date_added'].isoformat() if row['date_added'] else "",
+                    public=row['is_public'],
+                    source=row['source'],
+                    content_type=row['content_type'],
+                    region=row['region'],
+                    sentiment=row['sentiment']
+                ))
+            
+            return articles
         
     except Exception as e:
         logger.error(f"Error fetching articles: {e}")
@@ -945,7 +950,9 @@ async def get_articles():
 async def delete_article(article_id: str):
     """Delete an article"""
     try:
-        collection.delete(ids=[article_id])
+        pool = await get_db()
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM articles WHERE id = $1", uuid.UUID(article_id))
         return {"message": "Article deleted successfully"}
     except Exception as e:
         logger.error(f"Error deleting article: {e}")
@@ -955,60 +962,38 @@ async def delete_article(article_id: str):
 async def classify_unclassified_articles():
     """Classify sentiment for all articles that don't have sentiment yet"""
     try:
-        results = collection.get()
-        
-        classified_count = 0
-        already_classified = 0
-        errors = 0
-        
-        for i, (doc_id, metadata, document) in enumerate(zip(results['ids'], results['metadatas'], results['documents'])):
-            # Check if already has sentiment
-            if metadata.get('sentiment'):
-                already_classified += 1
-                continue
+        pool = await get_db()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, title, summary FROM articles WHERE sentiment IS NULL"
+            )
             
-            # Get content for classification
-            title = metadata.get('title', '')
-            content = document or title  # Use document (summary) or title
+            classified_count = 0
+            errors = 0
             
-            try:
-                # Classify sentiment
-                sentiment = await classify_sentiment(content, title)
-                
-                # Update the article metadata
-                # ChromaDB requires updating by deleting and re-adding
-                embedding = results['embeddings'][i] if results.get('embeddings') else None
-                
-                # Get the embedding if not included
-                if embedding is None:
-                    embedding = await get_embedding(document)
-                
-                # Update metadata with sentiment
-                new_metadata = {**metadata, "sentiment": sentiment}
-                
-                # Delete and re-add with new metadata
-                collection.delete(ids=[doc_id])
-                collection.add(
-                    ids=[doc_id],
-                    embeddings=[embedding],
-                    documents=[document],
-                    metadatas=[new_metadata]
-                )
-                
-                classified_count += 1
-                logger.info(f"Classified article '{title[:50]}...' as {sentiment}")
-                
-            except Exception as e:
-                logger.error(f"Error classifying article {doc_id}: {e}")
-                errors += 1
-                continue
-        
-        return {
-            "message": "Sentiment classification completed",
-            "classified": classified_count,
-            "already_classified": already_classified,
-            "errors": errors
-        }
+            for row in rows:
+                try:
+                    sentiment = await classify_sentiment(row['summary'] or row['title'], row['title'])
+                    await conn.execute(
+                        "UPDATE articles SET sentiment = $1 WHERE id = $2",
+                        sentiment, row['id']
+                    )
+                    classified_count += 1
+                    logger.info(f"Classified article '{row['title'][:50]}...' as {sentiment}")
+                except Exception as e:
+                    logger.error(f"Error classifying article {row['id']}: {e}")
+                    errors += 1
+            
+            already_classified = await conn.fetchval(
+                "SELECT COUNT(*) FROM articles WHERE sentiment IS NOT NULL"
+            ) - classified_count
+            
+            return {
+                "message": "Sentiment classification completed",
+                "classified": classified_count,
+                "already_classified": already_classified,
+                "errors": errors
+            }
         
     except Exception as e:
         logger.error(f"Error in sentiment classification: {e}")
@@ -1017,7 +1002,7 @@ async def classify_unclassified_articles():
 @app.get("/articles/stats", response_model=ArticleStatistics)
 async def get_stats():
     """Get article collection statistics"""
-    return get_article_statistics()
+    return await get_article_statistics()
 
 @app.get("/health")
 async def health_check():

@@ -2,6 +2,7 @@
 """
 Standalone article crawl script for use with GitHub Actions.
 Reads keywords from keywords.txt and crawls UK AI articles.
+Uses PostgreSQL with pgvector for storage.
 """
 
 import asyncio
@@ -10,7 +11,6 @@ import json
 import logging
 import os
 import sys
-import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -18,9 +18,10 @@ from urllib.parse import urlparse
 import urllib.robotparser
 
 from bs4 import BeautifulSoup
-import chromadb
 from openai import AsyncAzureOpenAI
 from ddgs import DDGS
+import asyncpg
+from pgvector.asyncpg import register_vector
 
 # Configure logging
 logging.basicConfig(
@@ -55,14 +56,29 @@ def load_keywords():
     return keywords
 
 
+def get_postgres_url():
+    """Get POSTGRES_URL from environment"""
+    url = os.environ.get("POSTGRES_URL")
+    if not url:
+        try:
+            from dotenv import dotenv_values
+            env_vars = dotenv_values(SCRIPT_DIR / ".env")
+            url = env_vars.get("POSTGRES_URL")
+        except Exception:
+            pass
+    
+    if not url:
+        logger.error("Missing POSTGRES_URL. Set it in environment or .env file.")
+        sys.exit(1)
+    
+    return url
+
+
 def init_openai_client(azure_config: dict) -> AsyncAzureOpenAI:
     """Initialize the Azure OpenAI client"""
-    # Get credentials from environment variables (for GitHub Actions)
-    # or from .env file (for local development)
     api_key = os.environ.get("AZURE_OPENAI_KEY")
     endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
     
-    # Try loading from .env file if not in environment
     if not api_key or not endpoint:
         try:
             from dotenv import dotenv_values
@@ -83,15 +99,15 @@ def init_openai_client(azure_config: dict) -> AsyncAzureOpenAI:
     )
 
 
-def init_chromadb():
-    """Initialize ChromaDB client"""
-    chroma_path = SCRIPT_DIR / "chroma_db"
-    client = chromadb.PersistentClient(path=str(chroma_path))
-    collection = client.get_or_create_collection(
-        name="articles",
-        metadata={"hnsw:space": "cosine"}
+async def init_db_pool(database_url: str):
+    """Initialize database connection pool"""
+    pool = await asyncpg.create_pool(
+        database_url,
+        min_size=1,
+        max_size=5,
+        init=register_vector
     )
-    return collection
+    return pool
 
 
 async def get_embedding(client: AsyncAzureOpenAI, deployment_name: str, text: str) -> List[float]:
@@ -271,15 +287,12 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[d
             html = await response.text()
             soup = BeautifulSoup(html, 'html.parser')
             
-            # Extract title
             title_tag = soup.find('title')
             title = title_tag.get_text().strip() if title_tag else "No title"
             
-            # Remove script and style elements
             for script in soup(["script", "style"]):
                 script.decompose()
             
-            # Try to find main content areas
             content_selectors = [
                 'article', 'main', '.content', '.post-content',
                 '.entry-content', '.article-body', 'div[role="main"]'
@@ -298,14 +311,12 @@ async def scrape_article(session: aiohttp.ClientSession, url: str) -> Optional[d
             
             content = ' '.join(content.split())
             
-            # Check for paywall
             paywall_indicators = [
                 "subscribe to read", "premium content", "sign up to continue",
                 "login to view", "paywall", "subscription required"
             ]
             is_public = not any(indicator in content.lower() for indicator in paywall_indicators)
             
-            # Extract publication date
             date_published = None
             date_selectors = ['time[datetime]', '.date', '.published', 'meta[property="article:published_time"]']
             for selector in date_selectors:
@@ -356,9 +367,43 @@ async def search_web(ddgs_client: DDGS, query: str, max_results: int = 10, regio
         return []
 
 
+async def article_exists(pool: asyncpg.Pool, url: str) -> bool:
+    """Check if article already exists in database"""
+    async with pool.acquire() as conn:
+        result = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM articles WHERE url = $1)",
+            url
+        )
+        return result
+
+
+async def store_article(
+    pool: asyncpg.Pool,
+    title: str,
+    url: str,
+    summary: str,
+    embedding: List[float],
+    date_published: Optional[str],
+    is_public: bool,
+    source: str,
+    content_type: str,
+    region: str,
+    sentiment: str
+):
+    """Store article in database"""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO articles (title, url, summary, embedding, date_published, is_public, source, content_type, region, sentiment)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """,
+            title, url, summary, embedding, date_published, is_public, source, content_type, region, sentiment
+        )
+
+
 async def crawl_keyword(
     keyword: str,
-    collection,
+    pool: asyncpg.Pool,
     openai_client: AsyncAzureOpenAI,
     chat_deployment: str,
     embedding_deployment: str,
@@ -380,13 +425,9 @@ async def crawl_keyword(
             
             try:
                 # Check if article already exists
-                try:
-                    existing = collection.get(where={"url": url})
-                    if existing['ids']:
-                        logger.info(f"Article already exists, skipping: {url}")
-                        continue
-                except Exception as e:
-                    logger.warning(f"Error checking existing article for {url}: {e}")
+                if await article_exists(pool, url):
+                    logger.info(f"Article already exists, skipping: {url}")
+                    continue
                 
                 # Try to scrape article content
                 article_data = await scrape_article(session, url)
@@ -430,27 +471,23 @@ async def crawl_keyword(
                         continue
                     
                     try:
-                        article_id = str(uuid.uuid4())
-                        collection.add(
-                            ids=[article_id],
-                            embeddings=[embedding],
-                            documents=[summary],
-                            metadatas=[{
-                                "title": article_data['title'] or "Untitled",
-                                "url": article_data['url'],
-                                "date_published": article_data['date_published'] or "",
-                                "date_added": datetime.now().isoformat(),
-                                "public": bool(article_data['public']),
-                                "source": article_data['source'] or "Unknown",
-                                "content_type": "full",
-                                "region": region,
-                                "sentiment": sentiment
-                            }]
+                        await store_article(
+                            pool=pool,
+                            title=article_data['title'] or "Untitled",
+                            url=article_data['url'],
+                            summary=summary,
+                            embedding=embedding,
+                            date_published=article_data['date_published'],
+                            is_public=bool(article_data['public']),
+                            source=article_data['source'] or "Unknown",
+                            content_type="full",
+                            region=region,
+                            sentiment=sentiment
                         )
                         articles_added += 1
                         logger.info(f"Added full article: {article_data['title']}")
                     except Exception as e:
-                        logger.error(f"ChromaDB storage failed for {url}: {e}")
+                        logger.error(f"Database storage failed for {url}: {e}")
                         continue
                 else:
                     # Scraping failed, store link-only article
@@ -487,27 +524,23 @@ async def crawl_keyword(
                         continue
                     
                     try:
-                        article_id = str(uuid.uuid4())
-                        collection.add(
-                            ids=[article_id],
-                            embeddings=[embedding],
-                            documents=[summary],
-                            metadatas=[{
-                                "title": search_title,
-                                "url": url,
-                                "date_published": "",
-                                "date_added": datetime.now().isoformat(),
-                                "public": True,
-                                "source": urlparse(url).netloc,
-                                "content_type": "link_only",
-                                "region": region,
-                                "sentiment": sentiment
-                            }]
+                        await store_article(
+                            pool=pool,
+                            title=search_title,
+                            url=url,
+                            summary=summary,
+                            embedding=embedding,
+                            date_published=None,
+                            is_public=True,
+                            source=urlparse(url).netloc,
+                            content_type="link_only",
+                            region=region,
+                            sentiment=sentiment
                         )
                         articles_added += 1
                         logger.info(f"Added link-only article: {search_title}")
                     except Exception as e:
-                        logger.error(f"ChromaDB storage failed for link-only article {url}: {e}")
+                        logger.error(f"Database storage failed for link-only article {url}: {e}")
                         continue
                         
             except Exception as e:
@@ -532,7 +565,8 @@ async def main():
     
     # Initialize clients
     openai_client = init_openai_client(azure_config)
-    collection = init_chromadb()
+    postgres_url = get_postgres_url()
+    pool = await init_db_pool(postgres_url)
     ddgs_client = DDGS()
     
     # Get deployment names from config
@@ -543,28 +577,31 @@ async def main():
     total_added = 0
     total_filtered = 0
     
-    for keyword in keywords:
-        logger.info(f"Crawling keyword: {keyword}")
-        try:
-            added, filtered = await crawl_keyword(
-                keyword=keyword,
-                collection=collection,
-                openai_client=openai_client,
-                chat_deployment=chat_deployment,
-                embedding_deployment=embedding_deployment,
-                ddgs_client=ddgs_client,
-                max_articles=5,  # 5 articles per keyword
-                region="uk-en"
-            )
-            total_added += added
-            total_filtered += filtered
-            logger.info(f"Keyword '{keyword}': {added} added, {filtered} filtered")
-        except Exception as e:
-            logger.error(f"Error crawling keyword '{keyword}': {e}")
-            continue
-        
-        # Small delay between keywords to be polite
-        await asyncio.sleep(2)
+    try:
+        for keyword in keywords:
+            logger.info(f"Crawling keyword: {keyword}")
+            try:
+                added, filtered = await crawl_keyword(
+                    keyword=keyword,
+                    pool=pool,
+                    openai_client=openai_client,
+                    chat_deployment=chat_deployment,
+                    embedding_deployment=embedding_deployment,
+                    ddgs_client=ddgs_client,
+                    max_articles=5,
+                    region="uk-en"
+                )
+                total_added += added
+                total_filtered += filtered
+                logger.info(f"Keyword '{keyword}': {added} added, {filtered} filtered")
+            except Exception as e:
+                logger.error(f"Error crawling keyword '{keyword}': {e}")
+                continue
+            
+            # Small delay between keywords to be polite
+            await asyncio.sleep(2)
+    finally:
+        await pool.close()
     
     logger.info("=" * 60)
     logger.info(f"Crawl complete: {total_added} articles added, {total_filtered} filtered")

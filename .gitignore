@@ -4,6 +4,8 @@
 *.zip
 # conda env
 backend/backend-env
+# ChromaDB (no longer used - migrated to Postgres)
+backend/chroma_db/
 
 **/.env
 
