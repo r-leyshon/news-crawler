@@ -93,6 +93,112 @@ class Article(BaseModel):
     region: Optional[str] = None
     sentiment: Optional[str] = None  # "positive", "neutral", "negative"
 
+class ArticleStatistics(BaseModel):
+    """Statistics about the article collection"""
+    total_articles: int
+    positive_count: int
+    neutral_count: int
+    negative_count: int
+    unclassified_count: int
+    full_articles_count: int
+    link_only_count: int
+    regions: dict  # region code -> count
+    sources: dict  # source domain -> count
+
+# Tool definitions for function calling
+ARTICLE_STATS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_article_statistics",
+        "description": "Get statistics about the article collection including counts by sentiment (positive, neutral, negative), content type (full articles vs link-only), regions, and sources. Use this when the user asks about how many articles there are, sentiment distribution, or any numerical questions about the collection.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }
+}
+
+def get_article_statistics() -> ArticleStatistics:
+    """Get current statistics about the article collection"""
+    try:
+        results = collection.get()
+        
+        if not results['ids']:
+            return ArticleStatistics(
+                total_articles=0,
+                positive_count=0,
+                neutral_count=0,
+                negative_count=0,
+                unclassified_count=0,
+                full_articles_count=0,
+                link_only_count=0,
+                regions={},
+                sources={}
+            )
+        
+        total = len(results['ids'])
+        positive = 0
+        neutral = 0
+        negative = 0
+        unclassified = 0
+        full_articles = 0
+        link_only = 0
+        regions = {}
+        sources = {}
+        
+        for metadata in results['metadatas']:
+            # Sentiment counts
+            sentiment = metadata.get('sentiment')
+            if sentiment == 'positive':
+                positive += 1
+            elif sentiment == 'neutral':
+                neutral += 1
+            elif sentiment == 'negative':
+                negative += 1
+            else:
+                unclassified += 1
+            
+            # Content type counts
+            content_type = metadata.get('content_type', 'full')
+            if content_type == 'link_only':
+                link_only += 1
+            else:
+                full_articles += 1
+            
+            # Region counts
+            region = metadata.get('region', 'unknown')
+            regions[region] = regions.get(region, 0) + 1
+            
+            # Source counts
+            source = metadata.get('source', 'unknown')
+            sources[source] = sources.get(source, 0) + 1
+        
+        return ArticleStatistics(
+            total_articles=total,
+            positive_count=positive,
+            neutral_count=neutral,
+            negative_count=negative,
+            unclassified_count=unclassified,
+            full_articles_count=full_articles,
+            link_only_count=link_only,
+            regions=regions,
+            sources=sources
+        )
+    except Exception as e:
+        logger.error(f"Error getting article statistics: {e}")
+        return ArticleStatistics(
+            total_articles=0,
+            positive_count=0,
+            neutral_count=0,
+            negative_count=0,
+            unclassified_count=0,
+            full_articles_count=0,
+            link_only_count=0,
+            regions={},
+            sources={}
+        )
+
 # Helper Functions
 
 async def filter_inappropriate_content(content: str, title: str = "") -> dict:
@@ -635,7 +741,7 @@ async def ask_question(request: QuestionRequest):
 
 @app.post("/ask/stream")
 async def ask_question_stream(request: QuestionRequest):
-    """Answer question using RAG with streaming response"""
+    """Answer question using RAG with streaming response and tool support"""
     
     async def generate_stream():
         try:
@@ -658,20 +764,31 @@ async def ask_question_stream(request: QuestionRequest):
             for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
                 # Handle both full articles and link-only articles
                 content_type = metadata.get('content_type', 'full')
+                sentiment = metadata.get('sentiment', 'unclassified')
                 if content_type == 'link_only':
-                    article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nType: External link only\nSource: {metadata.get('url', 'Unknown')}\n"
+                    article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nType: External link only\nSentiment: {sentiment}\nSource: {metadata.get('url', 'Unknown')}\n"
                 else:
-                    article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nSummary: {doc}\nSource: {metadata.get('url', 'Unknown')}\n"
+                    article_info = f"Article {i+1}: {metadata.get('title', 'Untitled')}\nSentiment: {sentiment}\nSummary: {doc}\nSource: {metadata.get('url', 'Unknown')}\n"
                 context_parts.append(article_info)
             
             context = "\n".join(context_parts)
             
             # Build conversation messages with context
+            system_prompt = f"""You are an AI assistant that answers questions based on a collection of articles. 
+
+You have access to a tool called 'get_article_statistics' that provides accurate counts of articles by sentiment, content type, region, and source. ALWAYS use this tool when the user asks about:
+- How many articles there are (total or by category)
+- Sentiment distribution (positive, neutral, negative counts)
+- Statistics or numbers about the collection
+- Breakdown by region or source
+
+Some articles have full summaries, while others are external links with titles only. Use only the information provided to answer questions. For external link articles, acknowledge that you only have the title and suggest the user click the link to read more. Always be helpful and cite which articles you're referencing.
+
+Available Articles (sample for content questions):
+{context}"""
+
             conversation_messages = [
-                {
-                    "role": "system", 
-                    "content": f"You are an AI assistant that answers questions based on a collection of articles. Some articles have full summaries, while others are external links with titles only. Use only the information provided to answer questions. For external link articles, acknowledge that you only have the title and suggest the user click the link to read more. Always be helpful and cite which articles you're referencing.\n\nAvailable Articles:\n{context}"
-                }
+                {"role": "system", "content": system_prompt}
             ]
             
             # Add conversation history if provided
@@ -688,22 +805,90 @@ async def ask_question_stream(request: QuestionRequest):
                 "content": request.question
             })
             
-            # Generate streaming answer using Azure OpenAI
-            stream = await asyncio.wait_for(
+            # First, make a non-streaming call to check for tool use
+            initial_response = await asyncio.wait_for(
                 openai_client.chat.completions.create(
                     model=CHAT_DEPLOYMENT_NAME,
                     messages=conversation_messages,
+                    tools=[ARTICLE_STATS_TOOL],
+                    tool_choice="auto",
                     max_tokens=500,
-                    temperature=0.3,
-                    stream=True
+                    temperature=0.3
                 ),
                 timeout=30.0
             )
             
-            async for chunk in stream:
-                if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content is not None:
-                    content = chunk.choices[0].delta.content
-                    yield f"data: {json.dumps({'content': content, 'done': False})}\n\n"
+            response_message = initial_response.choices[0].message
+            
+            # Check if the model wants to use a tool
+            if response_message.tool_calls:
+                # Process tool calls
+                tool_results = []
+                for tool_call in response_message.tool_calls:
+                    if tool_call.function.name == "get_article_statistics":
+                        # Execute the tool
+                        stats = get_article_statistics()
+                        tool_result = {
+                            "total_articles": stats.total_articles,
+                            "sentiment_breakdown": {
+                                "positive": stats.positive_count,
+                                "neutral": stats.neutral_count,
+                                "negative": stats.negative_count,
+                                "unclassified": stats.unclassified_count
+                            },
+                            "content_type_breakdown": {
+                                "full_articles": stats.full_articles_count,
+                                "link_only": stats.link_only_count
+                            },
+                            "by_region": stats.regions,
+                            "by_source": stats.sources
+                        }
+                        tool_results.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "content": json.dumps(tool_result)
+                        })
+                
+                # Add the assistant message with tool calls
+                conversation_messages.append({
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        } for tc in response_message.tool_calls
+                    ]
+                })
+                
+                # Add tool results
+                for tr in tool_results:
+                    conversation_messages.append(tr)
+                
+                # Now stream the final response with tool results
+                stream = await asyncio.wait_for(
+                    openai_client.chat.completions.create(
+                        model=CHAT_DEPLOYMENT_NAME,
+                        messages=conversation_messages,
+                        max_tokens=500,
+                        temperature=0.3,
+                        stream=True
+                    ),
+                    timeout=30.0
+                )
+                
+                async for chunk in stream:
+                    if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content is not None:
+                        content = chunk.choices[0].delta.content
+                        yield f"data: {json.dumps({'content': content, 'done': False})}\n\n"
+            else:
+                # No tool call, just stream the response content
+                if response_message.content:
+                    # Since we already have the full response, send it
+                    yield f"data: {json.dumps({'content': response_message.content, 'done': False})}\n\n"
             
             # Send completion signal
             yield f"data: {json.dumps({'content': '', 'done': True})}\n\n"
@@ -828,6 +1013,11 @@ async def classify_unclassified_articles():
     except Exception as e:
         logger.error(f"Error in sentiment classification: {e}")
         raise HTTPException(status_code=500, detail="Failed to classify articles")
+
+@app.get("/articles/stats", response_model=ArticleStatistics)
+async def get_stats():
+    """Get article collection statistics"""
+    return get_article_statistics()
 
 @app.get("/health")
 async def health_check():
