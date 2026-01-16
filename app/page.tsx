@@ -52,7 +52,8 @@ export default function ArticleAssistant() {
   // Check if user is the owner (can delete articles)
   const isOwner = session?.user?.isOwner === true
 
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+  // In production (Vercel), use relative URLs. Locally, fallback to localhost:8000
+  const API_BASE = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' && window.location.hostname !== 'localhost' ? '' : 'http://localhost:8000')
 
   // Initialize theme from localStorage
   useEffect(() => {
