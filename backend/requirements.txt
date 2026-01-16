@@ -10,3 +10,4 @@ numpy<2.0.0
 ddgs==9.4.3
 asyncpg==0.29.0
 pgvector==0.3.6
+mangum==0.17.0
