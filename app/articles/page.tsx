@@ -30,17 +30,19 @@ export default function ArticlesPage() {
   const [regionFilter, setRegionFilter] = useState<"all" | string>("all")
   const [isLoading, setIsLoading] = useState(true)
 
-  // Backend API URL - uses environment variable if set, otherwise detects environment
-  const [apiBase, setApiBase] = useState('http://localhost:8000')
+  // Backend API URL - uses relative URLs in production, localhost:8000 for local dev
+  const [apiBase, setApiBase] = useState('')
+  const [isApiReady, setIsApiReady] = useState(false)
   
   useEffect(() => {
     // Set API base URL on client side
     if (typeof window !== 'undefined') {
+      // In production (Vercel), use relative URLs (same domain)
+      // Locally, use localhost:8000 for the Python backend
       const url = process.env.NEXT_PUBLIC_API_URL || 
-        (window.location.hostname !== 'localhost' 
-          ? 'https://news-crawler-backend-r-leyshons-projects.vercel.app' 
-          : 'http://localhost:8000')
+        (window.location.hostname === 'localhost' ? 'http://localhost:8000' : '')
       setApiBase(url)
+      setIsApiReady(true)
     }
   }, [])
 
@@ -48,10 +50,10 @@ export default function ArticlesPage() {
   const uniqueRegions = Array.from(new Set(articles.map(article => article.region).filter((region): region is string => Boolean(region))))
 
   useEffect(() => {
-    if (apiBase) {
+    if (isApiReady) {
       fetchArticles()
     }
-  }, [apiBase])
+  }, [isApiReady])
 
   useEffect(() => {
     // Filter and search articles
