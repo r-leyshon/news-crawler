@@ -52,8 +52,19 @@ export default function ArticleAssistant() {
   // Check if user is the owner (can delete articles)
   const isOwner = session?.user?.isOwner === true
 
-  // In production, use the separate backend deployment. Locally, fallback to localhost:8000
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' && window.location.hostname !== 'localhost' ? 'https://news-crawler-backend-r-leyshons-projects.vercel.app' : 'http://localhost:8000')
+  // Backend API URL - uses environment variable if set, otherwise detects environment
+  const [apiBase, setApiBase] = useState('http://localhost:8000')
+  
+  useEffect(() => {
+    // Set API base URL on client side
+    if (typeof window !== 'undefined') {
+      const url = process.env.NEXT_PUBLIC_API_URL || 
+        (window.location.hostname !== 'localhost' 
+          ? 'https://news-crawler-backend-r-leyshons-projects.vercel.app' 
+          : 'http://localhost:8000')
+      setApiBase(url)
+    }
+  }, [])
 
   // Initialize theme from localStorage
   useEffect(() => {
@@ -277,12 +288,15 @@ export default function ArticleAssistant() {
   }, [messages])
 
   useEffect(() => {
-    fetchArticles()
-  }, [])
+    // Only fetch after apiBase is properly set
+    if (apiBase) {
+      fetchArticles()
+    }
+  }, [apiBase])
 
   const fetchArticles = async () => {
     try {
-      const response = await fetch(`${API_BASE}/articles`)
+      const response = await fetch(`${apiBase}/articles`)
       if (response.ok) {
         const data = await response.json()
         setArticles(data)
@@ -294,7 +308,7 @@ export default function ArticleAssistant() {
 
   const handleDeleteArticle = async (articleId: string) => {
     try {
-      const response = await fetch(`${API_BASE}/articles/${articleId}`, {
+      const response = await fetch(`${apiBase}/articles/${articleId}`, {
         method: "DELETE"
       })
       if (response.ok) {
@@ -317,7 +331,7 @@ export default function ArticleAssistant() {
   const handleClassifySentiment = async () => {
     setIsClassifying(true)
     try {
-      const response = await fetch(`${API_BASE}/articles/classify-sentiment`, {
+      const response = await fetch(`${apiBase}/articles/classify-sentiment`, {
         method: "POST"
       })
       if (response.ok) {
@@ -376,7 +390,7 @@ export default function ArticleAssistant() {
         content: msg.content
       }))
 
-      const response = await fetch(`${API_BASE}/ask/stream`, {
+      const response = await fetch(`${apiBase}/ask/stream`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
