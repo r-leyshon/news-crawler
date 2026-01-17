@@ -52,17 +52,18 @@ export default function ArticleAssistant() {
   // Check if user is the owner (can delete articles)
   const isOwner = session?.user?.isOwner === true
 
-  // Backend API URL - uses relative URLs in production, localhost:8000 for local dev
+  // Backend API URL - separate Vercel deployment for backend
   const [apiBase, setApiBase] = useState('')
   const [isApiReady, setIsApiReady] = useState(false)
   
   useEffect(() => {
     // Set API base URL on client side
     if (typeof window !== 'undefined') {
-      // In production (Vercel), use relative URLs (same domain)
-      // Locally, use localhost:8000 for the Python backend
+      // Use environment variable, or detect: localhost for dev, deployed backend for prod
       const url = process.env.NEXT_PUBLIC_API_URL || 
-        (window.location.hostname === 'localhost' ? 'http://localhost:8000' : '')
+        (window.location.hostname === 'localhost' 
+          ? 'http://localhost:8000' 
+          : 'https://news-crawler-backend-r-leyshons-projects.vercel.app')
       setApiBase(url)
       setIsApiReady(true)
     }
