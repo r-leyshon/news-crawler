@@ -61,15 +61,53 @@ env_vars = dotenv_values(env_path) if env_path.exists() else {}
 POSTGRES_URL = os.environ.get("POSTGRES_URL") or env_vars.get("POSTGRES_URL")
 
 # Initialize Vertex AI
-# For service account auth, set GOOGLE_APPLICATION_CREDENTIALS env var to path of JSON key file
-# Or the credentials will be auto-detected in GCP environments
+# Supports multiple auth methods:
+# 1. GOOGLE_APPLICATION_CREDENTIALS - path to JSON key file (local dev)
+# 2. GOOGLE_CREDENTIALS_JSON - JSON content as string (Vercel/serverless)
+# 3. Individual env vars: GOOGLE_PRIVATE_KEY + GOOGLE_CLIENT_EMAIL (Vercel-friendly)
 def init_vertex_ai():
     """Initialize Vertex AI with project and location"""
-    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or env_vars.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if credentials_path:
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+    import tempfile
+    from google.oauth2 import service_account
     
-    vertexai.init(project=PROJECT_ID, location=LOCATION)
+    credentials = None
+    
+    # Option 1: Individual env vars (Vercel-friendly)
+    private_key = os.environ.get("GOOGLE_PRIVATE_KEY") or env_vars.get("GOOGLE_PRIVATE_KEY")
+    client_email = os.environ.get("GOOGLE_CLIENT_EMAIL") or env_vars.get("GOOGLE_CLIENT_EMAIL")
+    
+    if private_key and client_email:
+        # Vercel escapes newlines, so we need to unescape them
+        private_key = private_key.replace("\\n", "\n")
+        
+        credentials_info = {
+            "type": "service_account",
+            "project_id": PROJECT_ID,
+            "private_key": private_key,
+            "client_email": client_email,
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        logger.info("Using GOOGLE_PRIVATE_KEY + GOOGLE_CLIENT_EMAIL for authentication")
+    
+    # Option 2: Full JSON string
+    elif credentials_json := (os.environ.get("GOOGLE_CREDENTIALS_JSON") or env_vars.get("GOOGLE_CREDENTIALS_JSON")):
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            f.write(credentials_json)
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f.name
+            logger.info("Using GOOGLE_CREDENTIALS_JSON for authentication")
+    
+    # Option 3: File path (local development)
+    elif credentials_path := (os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or env_vars.get("GOOGLE_APPLICATION_CREDENTIALS")):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+        logger.info("Using GOOGLE_APPLICATION_CREDENTIALS file for authentication")
+    
+    # Initialize Vertex AI
+    if credentials:
+        vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
+    else:
+        vertexai.init(project=PROJECT_ID, location=LOCATION)
+    
     logger.info(f"Vertex AI initialized with project={PROJECT_ID}, location={LOCATION}")
 
 init_vertex_ai()
