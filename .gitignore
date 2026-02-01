@@ -1,5 +1,5 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
+rich-experiments-fa333a2fdca7.json
 # Deployment artifacts
 *.zip
 # conda env
