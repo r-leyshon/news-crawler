@@ -23,10 +23,18 @@ jobs:
         
     - name: Install dependencies
       run: pip install -r backend/requirements.txt
+    
+    - name: Set up Google Cloud credentials
+      run: |
+        echo '${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}' > /tmp/gcp-credentials.json
         
     - name: Run crawl script
       env:
-        AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
-        AZURE_OPENAI_KEY: ${{ secrets.AZURE_OPENAI_KEY }}
+        GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+        GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp-credentials.json
         POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
       run: python backend/crawl_articles.py
+    
+    - name: Clean up credentials
+      if: always()
+      run: rm -f /tmp/gcp-credentials.json
