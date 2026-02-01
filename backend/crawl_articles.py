@@ -3,6 +3,7 @@
 Standalone article crawl script for use with GitHub Actions.
 Reads keywords from keywords.txt and crawls UK AI articles.
 Uses PostgreSQL with pgvector for storage.
+Uses Vertex AI (Gemini) for AI operations.
 """
 
 import asyncio
@@ -18,10 +19,14 @@ from urllib.parse import urlparse
 import urllib.robotparser
 
 from bs4 import BeautifulSoup
-from openai import AsyncAzureOpenAI
 from ddgs import DDGS
 import asyncpg
 from pgvector.asyncpg import register_vector
+
+# Vertex AI imports
+import vertexai
+from vertexai.generative_models import GenerativeModel, GenerationConfig
+from vertexai.language_models import TextEmbeddingModel
 
 # Configure logging
 logging.basicConfig(
@@ -39,7 +44,19 @@ def load_config():
     """Load configuration from config.json"""
     config_path = SCRIPT_DIR / "config.json"
     with open(config_path, "r") as f:
-        return json.load(f)
+        config = json.load(f)
+    return config
+
+
+def get_vertex_config(config: dict) -> dict:
+    """Extract Vertex AI configuration"""
+    vertex_config = config.get("vertex_ai", {})
+    return {
+        "project_id": os.environ.get("GOOGLE_CLOUD_PROJECT") or vertex_config.get("project_id"),
+        "location": vertex_config.get("location", "europe-west2"),
+        "chat_model": vertex_config.get("chat_model", "gemini-2.5-flash"),
+        "embedding_model": vertex_config.get("embedding_model", "text-embedding-005")
+    }
 
 
 def load_keywords():
@@ -74,29 +91,40 @@ def get_postgres_url():
     return url
 
 
-def init_openai_client(azure_config: dict) -> AsyncAzureOpenAI:
-    """Initialize the Azure OpenAI client"""
-    api_key = os.environ.get("AZURE_OPENAI_KEY")
-    endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+def init_vertex_ai(vertex_config: dict) -> tuple[GenerativeModel, TextEmbeddingModel]:
+    """Initialize Vertex AI and return chat and embedding models"""
+    project_id = vertex_config["project_id"]
+    location = vertex_config["location"]
     
-    if not api_key or not endpoint:
+    if not project_id:
+        # Try to get from environment
+        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    
+    if not project_id:
+        logger.error("Missing GOOGLE_CLOUD_PROJECT. Set it in environment or config.json.")
+        sys.exit(1)
+    
+    # Set credentials path if provided
+    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not credentials_path:
         try:
             from dotenv import dotenv_values
             env_vars = dotenv_values(SCRIPT_DIR / ".env")
-            api_key = api_key or env_vars.get("AZURE_OPENAI_KEY")
-            endpoint = endpoint or env_vars.get("AZURE_OPENAI_ENDPOINT")
+            credentials_path = env_vars.get("GOOGLE_APPLICATION_CREDENTIALS")
+            if credentials_path:
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
         except Exception:
             pass
     
-    if not api_key or not endpoint:
-        logger.error("Missing Azure OpenAI credentials. Set AZURE_OPENAI_KEY and AZURE_OPENAI_ENDPOINT.")
-        sys.exit(1)
+    # Initialize Vertex AI
+    vertexai.init(project=project_id, location=location)
+    logger.info(f"Vertex AI initialized with project={project_id}, location={location}")
     
-    return AsyncAzureOpenAI(
-        api_key=api_key,
-        api_version=azure_config["api_version"],
-        azure_endpoint=endpoint
-    )
+    # Initialize models
+    chat_model = GenerativeModel(vertex_config["chat_model"])
+    embedding_model = TextEmbeddingModel.from_pretrained(vertex_config["embedding_model"])
+    
+    return chat_model, embedding_model
 
 
 async def init_db_pool(database_url: str):
@@ -110,17 +138,17 @@ async def init_db_pool(database_url: str):
     return pool
 
 
-async def get_embedding(client: AsyncAzureOpenAI, deployment_name: str, text: str) -> List[float]:
-    """Generate embedding using Azure OpenAI"""
+async def get_embedding(embedding_model: TextEmbeddingModel, text: str) -> List[float]:
+    """Generate embedding using Vertex AI"""
     try:
         response = await asyncio.wait_for(
-            client.embeddings.create(
-                model=deployment_name,
-                input=text
+            asyncio.to_thread(
+                embedding_model.get_embeddings,
+                [text]
             ),
             timeout=30.0
         )
-        return response.data[0].embedding
+        return response[0].values
     except asyncio.TimeoutError:
         logger.error("Embedding generation timed out")
         raise
@@ -129,22 +157,27 @@ async def get_embedding(client: AsyncAzureOpenAI, deployment_name: str, text: st
         raise
 
 
-async def generate_summary(client: AsyncAzureOpenAI, deployment_name: str, text: str) -> str:
-    """Generate summary using Azure OpenAI"""
+async def generate_summary(chat_model: GenerativeModel, text: str) -> str:
+    """Generate summary using Vertex AI Gemini"""
     try:
+        prompt = f"""You are a helpful assistant that creates concise summaries of articles. 
+Summarize the following article in 3-5 sentences, focusing on the main points and key insights.
+
+Article text: {text[:4000]}"""
+        
+        generation_config = GenerationConfig(
+            temperature=0.3,
+        )
+        
         response = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=deployment_name,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that creates concise summaries of articles. Summarize the following article in 3-5 sentences, focusing on the main points and key insights."},
-                    {"role": "user", "content": f"Article text: {text[:4000]}"}
-                ],
-                max_tokens=200,
-                temperature=0.3
+            asyncio.to_thread(
+                chat_model.generate_content,
+                prompt,
+                generation_config=generation_config
             ),
             timeout=30.0
         )
-        return response.choices[0].message.content.strip()
+        return response.text.strip()
     except asyncio.TimeoutError:
         logger.error("Summary generation timed out")
         return "Summary generation timed out."
@@ -153,79 +186,65 @@ async def generate_summary(client: AsyncAzureOpenAI, deployment_name: str, text:
         return "Summary generation failed."
 
 
-async def classify_sentiment(client: AsyncAzureOpenAI, deployment_name: str, content: str, title: str = "") -> str:
+async def classify_sentiment(chat_model: GenerativeModel, content: str, title: str = "") -> str:
     """Classify article sentiment as positive, neutral, or negative"""
     try:
         analysis_text = content[:2000] + ("..." if len(content) > 2000 else "")
         if title:
             analysis_text = f"Title: {title}\n\nContent: {analysis_text}"
         
-        SENTIMENT_SCHEMA = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "sentiment_classification",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "sentiment": {
-                            "type": "string",
-                            "enum": ["positive", "neutral", "negative"],
-                            "description": "The overall sentiment of the article"
-                        }
-                    },
-                    "required": ["sentiment"],
-                    "additionalProperties": False
-                }
-            }
-        }
+        prompt = f"""Analyze the sentiment of this news article. Respond with exactly one word: positive, neutral, or negative.
+
+- positive: Good news, achievements, breakthroughs, solutions, optimistic outlook
+- neutral: Factual reporting, balanced coverage, informational content  
+- negative: Bad news, problems, failures, warnings, pessimistic outlook
+
+Article:
+{analysis_text}
+
+Sentiment (one word only):"""
+        
+        generation_config = GenerationConfig(
+            temperature=0.1,
+        )
         
         response = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=deployment_name,
-                messages=[
-                    {"role": "system", "content": "You are a sentiment analysis assistant. Analyze the sentiment of the provided article and classify it as positive, neutral, or negative."},
-                    {"role": "user", "content": analysis_text}
-                ],
-                response_format=SENTIMENT_SCHEMA,
-                max_tokens=50,
-                temperature=0.1
+            asyncio.to_thread(
+                chat_model.generate_content,
+                prompt,
+                generation_config=generation_config
             ),
             timeout=15.0
         )
         
-        result = json.loads(response.choices[0].message.content.strip())
-        return result.get("sentiment", "neutral")
+        result_text = response.text.strip().lower()
+        logger.info(f"Sentiment raw response: '{result_text}'")
+        
+        # Extract sentiment from response
+        if "positive" in result_text:
+            return "positive"
+        elif "negative" in result_text:
+            return "negative"
+        elif "neutral" in result_text:
+            return "neutral"
+        else:
+            logger.warning(f"Unexpected sentiment response: '{result_text}', defaulting to neutral")
+            return "neutral"
     except Exception as e:
         logger.error(f"Sentiment classification error: {e}")
         return "neutral"
 
 
-async def filter_inappropriate_content(client: AsyncAzureOpenAI, deployment_name: str, content: str, title: str = "") -> dict:
-    """Filter inappropriate content"""
+async def filter_inappropriate_content(chat_model: GenerativeModel, content: str, title: str = "") -> dict:
+    """Filter inappropriate content using Gemini"""
     try:
         analysis_text = content[:3000] + ("..." if len(content) > 3000 else "")
         if title:
             analysis_text = f"Title: {title}\n\nContent: {analysis_text}"
         
-        CONTENT_FILTER_SCHEMA = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "content_moderation_response",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "is_safe": {"type": "boolean"},
-                        "reason": {"type": "string"}
-                    },
-                    "required": ["is_safe", "reason"],
-                    "additionalProperties": False
-                },
-                "strict": True
-            }
-        }
-        
-        prompt = f"""Analyze the following content for appropriateness in a professional work environment. 
+        prompt = f"""You are a content moderation assistant. Analyze content for workplace appropriateness.
+
+Analyze the following content for appropriateness in a professional work environment. 
 
 Consider the content inappropriate if it contains:
 - Explicit sexual content or imagery descriptions
@@ -236,23 +255,37 @@ Consider the content inappropriate if it contains:
 - Gambling or illegal activities promotion
 
 Content to analyze:
-{analysis_text}"""
+{analysis_text}
+
+Respond with a JSON object containing:
+- "is_safe": true or false
+- "reason": brief explanation
+
+Return ONLY the JSON object, no other text."""
+        
+        generation_config = GenerationConfig(
+            temperature=0.1,
+        )
         
         response = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=deployment_name,
-                messages=[
-                    {"role": "system", "content": "You are a content moderation assistant. Analyze content for workplace appropriateness."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format=CONTENT_FILTER_SCHEMA,
-                max_tokens=100,
-                temperature=0.1
+            asyncio.to_thread(
+                chat_model.generate_content,
+                prompt,
+                generation_config=generation_config
             ),
             timeout=15.0
         )
         
-        return json.loads(response.choices[0].message.content.strip())
+        result_text = response.text.strip()
+        logger.info(f"Content filter raw response: '{result_text[:100]}...'")
+        
+        # Clean up potential markdown code blocks
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+        result_text = result_text.strip()
+        return json.loads(result_text)
     except Exception as e:
         logger.error(f"Content filtering error: {e}")
         return {"is_safe": True, "reason": f"Filter error: {str(e)}"}
@@ -404,9 +437,8 @@ async def store_article(
 async def crawl_keyword(
     keyword: str,
     pool: asyncpg.Pool,
-    openai_client: AsyncAzureOpenAI,
-    chat_deployment: str,
-    embedding_deployment: str,
+    chat_model: GenerativeModel,
+    embedding_model: TextEmbeddingModel,
     ddgs_client: DDGS,
     max_articles: int = 5,
     region: str = "uk-en"
@@ -436,7 +468,7 @@ async def crawl_keyword(
                     # Full article scraped successfully
                     try:
                         filter_result = await filter_inappropriate_content(
-                            openai_client, chat_deployment,
+                            chat_model,
                             article_data['content'], article_data['title']
                         )
                         
@@ -448,7 +480,7 @@ async def crawl_keyword(
                         logger.error(f"Content filtering error for {url}: {e}")
                     
                     try:
-                        summary = await generate_summary(openai_client, chat_deployment, article_data['content'])
+                        summary = await generate_summary(chat_model, article_data['content'])
                         if not summary or summary.startswith("Summary generation"):
                             summary = article_data['content'][:500] + "..."
                     except Exception as e:
@@ -457,7 +489,7 @@ async def crawl_keyword(
                     
                     try:
                         sentiment = await classify_sentiment(
-                            openai_client, chat_deployment,
+                            chat_model,
                             article_data['content'], article_data['title']
                         )
                     except Exception as e:
@@ -465,7 +497,7 @@ async def crawl_keyword(
                         sentiment = "neutral"
                     
                     try:
-                        embedding = await get_embedding(openai_client, embedding_deployment, summary)
+                        embedding = await get_embedding(embedding_model, summary)
                     except Exception as e:
                         logger.error(f"Embedding generation failed for {url}: {e}")
                         continue
@@ -497,7 +529,7 @@ async def crawl_keyword(
                     
                     try:
                         filter_result = await filter_inappropriate_content(
-                            openai_client, chat_deployment, search_content, search_title
+                            chat_model, search_content, search_title
                         )
                         
                         if not filter_result['is_safe']:
@@ -511,14 +543,14 @@ async def crawl_keyword(
                     
                     try:
                         sentiment = await classify_sentiment(
-                            openai_client, chat_deployment, search_content, search_title
+                            chat_model, search_content, search_title
                         )
                     except Exception as e:
                         logger.error(f"Sentiment classification error for search result {url}: {e}")
                         sentiment = "neutral"
                     
                     try:
-                        embedding = await get_embedding(openai_client, embedding_deployment, summary)
+                        embedding = await get_embedding(embedding_model, summary)
                     except Exception as e:
                         logger.error(f"Embedding generation failed for search result {url}: {e}")
                         continue
@@ -558,20 +590,18 @@ async def main():
     
     # Load configuration
     config = load_config()
-    azure_config = config["azure_openai"]
+    vertex_config = get_vertex_config(config)
     
     # Load keywords
     keywords = load_keywords()
     
-    # Initialize clients
-    openai_client = init_openai_client(azure_config)
+    # Initialize Vertex AI and models
+    chat_model, embedding_model = init_vertex_ai(vertex_config)
+    
+    # Initialize database
     postgres_url = get_postgres_url()
     pool = await init_db_pool(postgres_url)
     ddgs_client = DDGS()
-    
-    # Get deployment names from config
-    chat_deployment = azure_config["chat_deployment_name"]
-    embedding_deployment = azure_config["embedding_deployment_name"]
     
     # Crawl each keyword
     total_added = 0
@@ -584,9 +614,8 @@ async def main():
                 added, filtered = await crawl_keyword(
                     keyword=keyword,
                     pool=pool,
-                    openai_client=openai_client,
-                    chat_deployment=chat_deployment,
-                    embedding_deployment=embedding_deployment,
+                    chat_model=chat_model,
+                    embedding_model=embedding_model,
                     ddgs_client=ddgs_client,
                     max_articles=5,
                     region="uk-en"
