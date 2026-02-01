@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
-from openai import AsyncAzureOpenAI
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
@@ -20,6 +19,11 @@ from ddgs import DDGS
 import asyncpg
 from pgvector.asyncpg import register_vector
 
+# Vertex AI imports
+import vertexai
+from vertexai.generative_models import GenerativeModel, Part, GenerationConfig
+from vertexai.language_models import TextEmbeddingModel
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,11 +35,12 @@ BACKEND_DIR = Path(__file__).parent
 with open(BACKEND_DIR / "config.json", "r") as f:
     config = json.load(f)
 
-# Extract Azure OpenAI config
-azure_config = config["azure_openai"]
-CHAT_DEPLOYMENT_NAME = azure_config["chat_deployment_name"]
-EMBEDDING_DEPLOYMENT_NAME = azure_config["embedding_deployment_name"]
-API_VERSION = azure_config["api_version"]
+# Extract Vertex AI config
+vertex_config = config["vertex_ai"]
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT") or vertex_config.get("project_id")
+LOCATION = vertex_config.get("location", "europe-west2")
+CHAT_MODEL_NAME = vertex_config.get("chat_model", "gemini-2.5-flash")
+EMBEDDING_MODEL_NAME = vertex_config.get("embedding_model", "text-embedding-005")
 
 app = FastAPI(title="AI Article Assistant API")
 
@@ -55,12 +60,25 @@ env_vars = dotenv_values(env_path) if env_path.exists() else {}
 # Get POSTGRES_URL from environment or .env
 POSTGRES_URL = os.environ.get("POSTGRES_URL") or env_vars.get("POSTGRES_URL")
 
-# Initialize Azure OpenAI client
-openai_client = AsyncAzureOpenAI(
-    api_key=os.environ.get("AZURE_OPENAI_KEY") or env_vars.get("AZURE_OPENAI_KEY"),
-    api_version=API_VERSION,
-    azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT") or env_vars.get("AZURE_OPENAI_ENDPOINT")
-)
+# Initialize Vertex AI
+# For service account auth, set GOOGLE_APPLICATION_CREDENTIALS env var to path of JSON key file
+# Or the credentials will be auto-detected in GCP environments
+def init_vertex_ai():
+    """Initialize Vertex AI with project and location"""
+    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or env_vars.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if credentials_path:
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+    
+    vertexai.init(project=PROJECT_ID, location=LOCATION)
+    logger.info(f"Vertex AI initialized with project={PROJECT_ID}, location={LOCATION}")
+
+init_vertex_ai()
+
+# Initialize Gemini model for chat
+chat_model = GenerativeModel(CHAT_MODEL_NAME)
+
+# Initialize embedding model
+embedding_model = TextEmbeddingModel.from_pretrained(EMBEDDING_MODEL_NAME)
 
 # Initialize DDGS client
 ddgs_client = DDGS()
@@ -133,20 +151,6 @@ class ArticleStatistics(BaseModel):
     link_only_count: int
     regions: dict
     sources: dict
-
-# Tool definitions for function calling
-ARTICLE_STATS_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "get_article_statistics",
-        "description": "Get statistics about the article collection including counts by sentiment (positive, neutral, negative), content type (full articles vs link-only), regions, and sources. Use this when the user asks about how many articles there are, sentiment distribution, or any numerical questions about the collection.",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    }
-}
 
 async def get_article_statistics() -> ArticleStatistics:
     """Get current statistics about the article collection"""
@@ -251,30 +255,15 @@ async def get_article_statistics() -> ArticleStatistics:
 # Helper Functions
 
 async def filter_inappropriate_content(content: str, title: str = "") -> dict:
-    """Use OpenAI to analyze content for inappropriate material"""
+    """Use Gemini to analyze content for inappropriate material"""
     try:
         analysis_text = content[:3000] + ("..." if len(content) > 3000 else "")
         if title:
             analysis_text = f"Title: {title}\n\nContent: {analysis_text}"
         
-        CONTENT_FILTER_SCHEMA = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "content_moderation_response",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "is_safe": {"type": "boolean"},
-                        "reason": {"type": "string"}
-                    },
-                    "required": ["is_safe", "reason"],
-                    "additionalProperties": False
-                },
-                "strict": True
-            }
-        }
-        
-        prompt = f"""Analyze the following content for appropriateness in a professional work environment. 
+        prompt = f"""You are a content moderation assistant. Analyze content for workplace appropriateness.
+
+Analyze the following content for appropriateness in a professional work environment. 
 
 Consider the content inappropriate if it contains:
 - Explicit sexual content or imagery descriptions
@@ -285,23 +274,36 @@ Consider the content inappropriate if it contains:
 - Gambling or illegal activities promotion
 
 Content to analyze:
-{analysis_text}"""
+{analysis_text}
+
+Respond with a JSON object containing:
+- "is_safe": true or false
+- "reason": brief explanation
+
+Return ONLY the JSON object, no other text."""
+        
+        generation_config = GenerationConfig(
+            temperature=0.1,
+        )
         
         response = await asyncio.wait_for(
-            openai_client.chat.completions.create(
-                model=CHAT_DEPLOYMENT_NAME,
-                messages=[
-                    {"role": "system", "content": "You are a content moderation assistant. Analyze content for workplace appropriateness."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format=CONTENT_FILTER_SCHEMA,
-                max_tokens=100,
-                temperature=0.1
+            asyncio.to_thread(
+                chat_model.generate_content,
+                prompt,
+                generation_config=generation_config
             ),
             timeout=15.0
         )
         
-        result_text = response.choices[0].message.content.strip()
+        result_text = response.text.strip()
+        logger.info(f"Content filter raw response: '{result_text[:100]}...'")
+        
+        # Clean up potential markdown code blocks
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+        result_text = result_text.strip()
         return json.loads(result_text)
         
     except Exception as e:
@@ -315,67 +317,59 @@ async def classify_sentiment(content: str, title: str = "") -> str:
         if title:
             analysis_text = f"Title: {title}\n\nContent: {analysis_text}"
         
-        SENTIMENT_SCHEMA = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "sentiment_classification",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "sentiment": {
-                            "type": "string",
-                            "enum": ["positive", "neutral", "negative"],
-                            "description": "The overall sentiment of the article"
-                        }
-                    },
-                    "required": ["sentiment"],
-                    "additionalProperties": False
-                }
-            }
-        }
-        
-        prompt = f"""Analyze the sentiment of this news article. Classify it as:
-- "positive": Good news, achievements, breakthroughs, solutions, optimistic outlook
-- "neutral": Factual reporting, balanced coverage, informational content
-- "negative": Bad news, problems, failures, warnings, pessimistic outlook
+        prompt = f"""Analyze the sentiment of this news article. Respond with exactly one word: positive, neutral, or negative.
+
+- positive: Good news, achievements, breakthroughs, solutions, optimistic outlook
+- neutral: Factual reporting, balanced coverage, informational content  
+- negative: Bad news, problems, failures, warnings, pessimistic outlook
 
 Article:
-{analysis_text}"""
+{analysis_text}
+
+Sentiment (one word only):"""
+        
+        generation_config = GenerationConfig(
+            temperature=0.1,
+        )
         
         response = await asyncio.wait_for(
-            openai_client.chat.completions.create(
-                model=CHAT_DEPLOYMENT_NAME,
-                messages=[
-                    {"role": "system", "content": "You are a sentiment analysis assistant. Classify news articles by their overall tone and sentiment."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format=SENTIMENT_SCHEMA,
-                max_tokens=50,
-                temperature=0.1
+            asyncio.to_thread(
+                chat_model.generate_content,
+                prompt,
+                generation_config=generation_config
             ),
             timeout=15.0
         )
         
-        result_text = response.choices[0].message.content.strip()
-        result = json.loads(result_text)
-        return result.get("sentiment", "neutral")
+        result_text = response.text.strip().lower()
+        logger.info(f"Sentiment raw response: '{result_text}'")
+        
+        # Extract sentiment from response
+        if "positive" in result_text:
+            return "positive"
+        elif "negative" in result_text:
+            return "negative"
+        elif "neutral" in result_text:
+            return "neutral"
+        else:
+            logger.warning(f"Unexpected sentiment response: '{result_text}', defaulting to neutral")
+            return "neutral"
         
     except Exception as e:
         logger.error(f"Sentiment classification error: {e}")
         return "neutral"
 
 async def get_embedding(text: str) -> List[float]:
-    """Generate embedding using Azure OpenAI"""
+    """Generate embedding using Vertex AI"""
     try:
         response = await asyncio.wait_for(
-            openai_client.embeddings.create(
-                model=EMBEDDING_DEPLOYMENT_NAME,
-                input=text
+            asyncio.to_thread(
+                embedding_model.get_embeddings,
+                [text]
             ),
             timeout=30.0
         )
-        return response.data[0].embedding
+        return response[0].values
     except asyncio.TimeoutError:
         logger.error("Embedding generation timed out")
         raise HTTPException(status_code=500, detail="Embedding generation timed out")
@@ -384,21 +378,26 @@ async def get_embedding(text: str) -> List[float]:
         raise HTTPException(status_code=500, detail="Failed to generate embedding")
 
 async def generate_summary(text: str) -> str:
-    """Generate summary using Azure OpenAI"""
+    """Generate summary using Vertex AI Gemini"""
     try:
+        prompt = f"""You are a helpful assistant that creates concise summaries of articles. 
+Summarize the following article in 3-5 sentences, focusing on the main points and key insights.
+
+Article text: {text[:4000]}"""
+        
+        generation_config = GenerationConfig(
+            temperature=0.3,
+        )
+        
         response = await asyncio.wait_for(
-            openai_client.chat.completions.create(
-                model=CHAT_DEPLOYMENT_NAME,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that creates concise summaries of articles. Summarize the following article in 3-5 sentences, focusing on the main points and key insights."},
-                    {"role": "user", "content": f"Article text: {text[:4000]}"}
-                ],
-                max_tokens=200,
-                temperature=0.3
+            asyncio.to_thread(
+                chat_model.generate_content,
+                prompt,
+                generation_config=generation_config
             ),
             timeout=30.0
         )
-        return response.choices[0].message.content.strip()
+        return response.text.strip()
     except asyncio.TimeoutError:
         logger.error("Summary generation timed out")
         return "Summary generation timed out."
@@ -741,30 +740,36 @@ async def ask_question(request: QuestionRequest):
         
         context = "\n".join(context_parts)
         
-        conversation_messages = [
-            {
-                "role": "system", 
-                "content": f"You are an AI assistant that answers questions based on a collection of articles. Use only the information provided to answer questions. Always be helpful and cite which articles you're referencing.\n\nAvailable Articles:\n{context}"
-            }
-        ]
-        
+        # Build conversation history for Gemini
+        history_text = ""
         if request.messages:
             for msg in request.messages:
-                conversation_messages.append({"role": msg.role, "content": msg.content})
+                role_label = "User" if msg.role == "user" else "Assistant"
+                history_text += f"{role_label}: {msg.content}\n\n"
         
-        conversation_messages.append({"role": "user", "content": request.question})
+        prompt = f"""You are an AI assistant that answers questions based on a collection of articles. Use only the information provided to answer questions. Always be helpful and cite which articles you're referencing.
+
+Available Articles:
+{context}
+
+{history_text}User: {request.question}
+
+Please provide a helpful answer based on the articles above."""
+        
+        generation_config = GenerationConfig(
+            temperature=0.3,
+        )
         
         response = await asyncio.wait_for(
-            openai_client.chat.completions.create(
-                model=CHAT_DEPLOYMENT_NAME,
-                messages=conversation_messages,
-                max_tokens=500,
-                temperature=0.3
+            asyncio.to_thread(
+                chat_model.generate_content,
+                prompt,
+                generation_config=generation_config
             ),
             timeout=30.0
         )
         
-        return {"answer": response.choices[0].message.content.strip()}
+        return {"answer": response.text.strip()}
         
     except asyncio.TimeoutError:
         logger.error("Question answering timed out")
@@ -799,101 +804,68 @@ async def ask_question_stream(request: QuestionRequest):
             
             context = "\n".join(context_parts)
             
-            system_prompt = f"""You are an AI assistant that answers questions based on a collection of articles. 
-
-You have access to a tool called 'get_article_statistics' that provides accurate counts of articles by sentiment, content type, region, and source. ALWAYS use this tool when the user asks about:
-- How many articles there are (total or by category)
-- Sentiment distribution (positive, neutral, negative counts)
-- Statistics or numbers about the collection
-- Breakdown by region or source
-
-Available Articles (sample for content questions):
-{context}"""
-
-            conversation_messages = [{"role": "system", "content": system_prompt}]
+            # Check if the question is about statistics
+            stats_keywords = ["how many", "count", "total", "statistics", "breakdown", "distribution", "sentiment"]
+            question_lower = request.question.lower()
+            needs_stats = any(keyword in question_lower for keyword in stats_keywords)
             
+            stats_context = ""
+            if needs_stats:
+                stats = await get_article_statistics()
+                stats_context = f"""
+
+Article Statistics:
+- Total articles: {stats.total_articles}
+- Sentiment breakdown:
+  - Positive: {stats.positive_count}
+  - Neutral: {stats.neutral_count}
+  - Negative: {stats.negative_count}
+  - Unclassified: {stats.unclassified_count}
+- Content types:
+  - Full articles: {stats.full_articles_count}
+  - Link-only: {stats.link_only_count}
+- By region: {json.dumps(stats.regions)}
+- By source: {json.dumps(stats.sources)}
+"""
+            
+            # Build conversation history for Gemini
+            history_text = ""
             if request.messages:
                 for msg in request.messages:
-                    conversation_messages.append({"role": msg.role, "content": msg.content})
+                    role_label = "User" if msg.role == "user" else "Assistant"
+                    history_text += f"{role_label}: {msg.content}\n\n"
             
-            conversation_messages.append({"role": "user", "content": request.question})
+            prompt = f"""You are an AI assistant that answers questions based on a collection of articles. Use only the information provided to answer questions. Always be helpful and cite which articles you're referencing.
+
+Available Articles (sample for content questions):
+{context}
+{stats_context}
+{history_text}User: {request.question}
+
+Please provide a helpful answer based on the information above."""
             
-            # Check for tool use
-            initial_response = await asyncio.wait_for(
-                openai_client.chat.completions.create(
-                    model=CHAT_DEPLOYMENT_NAME,
-                    messages=conversation_messages,
-                    tools=[ARTICLE_STATS_TOOL],
-                    tool_choice="auto",
-                    max_tokens=500,
-                    temperature=0.3
+            generation_config = GenerationConfig(
+                max_output_tokens=1024,  # Gemini 2.5 uses ~200-300 thinking tokens
+                temperature=0.3,
+            )
+            
+            # Gemini doesn't support async streaming directly, so we generate and stream chunks
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    chat_model.generate_content,
+                    prompt,
+                    generation_config=generation_config
                 ),
                 timeout=30.0
             )
             
-            response_message = initial_response.choices[0].message
-            
-            if response_message.tool_calls:
-                tool_results = []
-                for tool_call in response_message.tool_calls:
-                    if tool_call.function.name == "get_article_statistics":
-                        stats = await get_article_statistics()
-                        tool_result = {
-                            "total_articles": stats.total_articles,
-                            "sentiment_breakdown": {
-                                "positive": stats.positive_count,
-                                "neutral": stats.neutral_count,
-                                "negative": stats.negative_count,
-                                "unclassified": stats.unclassified_count
-                            },
-                            "content_type_breakdown": {
-                                "full_articles": stats.full_articles_count,
-                                "link_only": stats.link_only_count
-                            },
-                            "by_region": stats.regions,
-                            "by_source": stats.sources
-                        }
-                        tool_results.append({
-                            "tool_call_id": tool_call.id,
-                            "role": "tool",
-                            "content": json.dumps(tool_result)
-                        })
-                
-                conversation_messages.append({
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments
-                            }
-                        } for tc in response_message.tool_calls
-                    ]
-                })
-                
-                for tr in tool_results:
-                    conversation_messages.append(tr)
-                
-                stream = await asyncio.wait_for(
-                    openai_client.chat.completions.create(
-                        model=CHAT_DEPLOYMENT_NAME,
-                        messages=conversation_messages,
-                        max_tokens=500,
-                        temperature=0.3,
-                        stream=True
-                    ),
-                    timeout=30.0
-                )
-                
-                async for chunk in stream:
-                    if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content is not None:
-                        content = chunk.choices[0].delta.content
-                        yield f"data: {json.dumps({'content': content, 'done': False})}\n\n"
-            else:
-                if response_message.content:
-                    yield f"data: {json.dumps({'content': response_message.content, 'done': False})}\n\n"
+            # Stream the response in chunks for a better UX
+            full_text = response.text
+            chunk_size = 50  # Characters per chunk
+            for i in range(0, len(full_text), chunk_size):
+                chunk = full_text[i:i + chunk_size]
+                yield f"data: {json.dumps({'content': chunk, 'done': False})}\n\n"
+                await asyncio.sleep(0.02)  # Small delay for streaming effect
             
             yield f"data: {json.dumps({'content': '', 'done': True})}\n\n"
             
